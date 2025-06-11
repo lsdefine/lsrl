@@ -36,15 +36,15 @@ def decoding_layer_forward(self, hidden_states, attention_mask,
         if output_attentions: outputs += (self_attn_weights,)
         return outputs
 
-def patch_qwen2_for_multi_gpus(model):
+def patch_qwen2_for_multi_gpus(model, devices):
     for layer in model.model.layers:
         layer.forward = decoding_layer_forward.__get__(layer, nn.Module)
     layers = [model.model.embed_tokens]
     layers += [x for x in model.model.layers]
     layers += [model.model.norm, model.lm_head]
-    device_count = torch.cuda.device_count()
-    print(f"Detected {device_count} GPUs.")
+    device_count = len(devices)
+    print(f"Split model to {device_count} GPUs.")
     chunk_size = (len(layers)+3) // device_count + 1
     ids = [i // chunk_size for i in range(len(layers)+3)][2:-1]
-    for layer, k in zip(layers, ids): layer.to(f'cuda:{k}')
-    print(f'Make sure that the input should in cuda:0 and the output in cuda:{device_count - 1}...')
+    for layer, k in zip(layers, ids): layer.to(f'cuda:{devices[k]}')
+    print(f'Make sure that the input should in cuda:{devices[0]} and the output in cuda:{devices[-1]}...')
