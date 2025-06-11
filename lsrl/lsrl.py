@@ -26,7 +26,8 @@ class LSCPUTrainer(LSTrainer):
         self.model.to('cuda')
         self.device = self.model.device
         self.model.gradient_checkpointing_enable()
-        from .cpuadamw import CPUAdamW
+        from .cpuadamw import CPUAdamW, DistributedCPUAdamW
+        if dist.is_initialized(): CPUAdamW = DistributedCPUAdamW
         self.opt = CPUAdamW(self.model.parameters(), lr=lr, accum_steps=accum_steps, grad_offload=grad_offload)
         self.engine = self.model
 

@@ -101,9 +101,8 @@ class DistributedCPUAdamW(Optimizer):
             print("If you want to train long long sequences, consider manually set grad_offload=True.")
         else:
             self.grad_offload = grad_offload
-           
-        for p in params: 
-            if p.requires_grad: self.gpu_params.append(p)
+
+        self.gpu_params = [p for p in params if p.requires_grad] 
 
         if self.rank == 0:
             self.original_device_map = {}  
@@ -122,7 +121,7 @@ class DistributedCPUAdamW(Optimizer):
     def step(self, closure=None):  
         self.current_step += 1  
         is_update_step = self.current_step >= self.accum_steps  
-
+        
         if self.grad_offload or is_update_step:
             for p in self.gpu_params:
                 if p.grad is not None:
