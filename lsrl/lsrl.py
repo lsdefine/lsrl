@@ -207,7 +207,7 @@ class LSRL:
         torch.cuda.set_device(0)
         print(f"Generation worker process uses GPU {gen_device}")
         from vllm import LLM, SamplingParams
-        vllm_gen = LLM(model=self.model_path, gpu_memory_utilization=0.5)
+        vllm_gen = LLM(model=self.model_path, enable_chunked_prefill=True, gpu_memory_utilization=0.5)
         gen_logps_sp = SamplingParams(temperature=0, top_p=1, max_tokens=1, prompt_logprobs=1)
 
         def gen_samples(items):
