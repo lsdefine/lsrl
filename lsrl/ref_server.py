@@ -3,15 +3,15 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 import torch
 from bottle import request
 import bottle, threading, queue
-from .utils import tensor_to_bytes, bytes_to_tensor, make_bytes_list, bytes_list_to_list
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from .utils import json_to_bytes_list, bytes_list_to_json
+from transformers import AutoModelForCausalLM
 import torch
 import torch.nn as nn
 
 def get_per_token_logps(model, input_ids):
     logits = model(input_ids).logits  # (B, L, V)
-    logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
-    input_ids = input_ids[:, 1:]  # (B, L-1), exclude the first input ID since we don't have logits for it
+    logits = logits[:, :-1, :]        # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
+    input_ids = input_ids[:, 1:]      # (B, L-1), exclude the first input ID since we don't have logits for it
     per_token_logps = []
     input_ids = input_ids.to(logits.device)  
     for logits_row, input_ids_row in zip(logits, input_ids):
@@ -30,17 +30,29 @@ class RefServer:
         self.app = bottle.Bottle()
         self.host = host
         self.port = port
+        self.small_bsz = 8
+        self.oom_count = 0
+
+    def auto_bsz_infer(self, model, input_ids, pred_func, small_bsz=0):
+        sbsz = self.small_bsz if small_bsz <= 0 else small_bsz
+        try: 
+            rets = [pred_func(model, input_ids[i:i+sbsz])
+                    for i in range(0, input_ids.shape[0], sbsz)]
+            return torch.stack(rets, dim=0) if len(rets) > 1 else rets[0]
+        except torch.cuda.OutOfMemoryError:
+            if sbsz == 1: raise Exception('Batch size is 1, cannot reduce further.')
+            print('\nOOM, try to reduce batch size...')
+            ret = self.auto_bsz_infer(model, input_ids, pred_func, small_bsz=sbsz//2)
+            if small_bsz == 0:
+                self.oom_count += 1
+                if self.oom_count > 3: self.small_bsz, self.oom_count = max(1, sbsz//2), 0
+            return ret
         
     def run_server(self): 
         @self.app.route('/upload', method='POST')
         def do_upload():
             dd = request.body.read()
-            dd = bytes_list_to_list(dd)
-            if len(dd) not in (3,4): return b'tensor'
-            data = {'base': json.loads(dd[0])} 
-            data['inputs'] = bytes_to_tensor(dd[1])
-            data['rewards'] = bytes_to_tensor(dd[2])
-            if len(dd) == 4: data['gen_logps'] = bytes_to_tensor(dd[3])
+            data = bytes_list_to_json(dd)
             self.raw_queue.put(data)
             return b'tensor'
 
@@ -62,20 +74,16 @@ class RefServer:
         else:
             self.model.to('cuda')
 
+        device = self.model.device
         while True:
             d = self.raw_queue.get()
             tic = time.time()
-            prompt_length = d['base']['plen']
-            data = [json.dumps(d['base']).encode(), d['inputs'], d['rewards']]
-            if 'end' not in d['base']:
+            plen = d.get('plen', 0)
+            if 'end' not in d:
                 with torch.inference_mode():
-                    per_token_logps = get_per_token_logps(self.model, d['inputs'].to(self.model.device))
-                per_token_logps = per_token_logps[:,prompt_length-1:]
-                data.append(per_token_logps)
-            else: data.append(torch.tensor([0]))
-            if 'gen_logps' in d: data.append(d['gen_logps'])
-            data = [data[0]] + [tensor_to_bytes(t) for t in data[1:]]
-            xdata = make_bytes_list(data)
-            self.result_queue.put(xdata)
-            print('batch', d['base'], d['inputs'].shape, d['rewards'], f' time: {time.time() - tic:.2f}s')
+                    logps = self.auto_bsz_infer(self.model, d['inputs'].to(device), get_per_token_logps)
+                d['refs'] = logps[:,plen-1:]
+            d['remain_cnt'] = self.result_queue.qsize()
+            self.result_queue.put(json_to_bytes_list(d))
+            print('batch', d['inputs'].shape, d['rewards'], f' time: {time.time() - tic:.2f}s')
             if random.random() < 0.1: print(f'raw_queue: {self.raw_queue.qsize()}, result_queue: {self.result_queue.qsize()}')

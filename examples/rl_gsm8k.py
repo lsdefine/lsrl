@@ -39,7 +39,7 @@ if __name__ == '__main__':
     lsrl = LSRL(model_path, epochs=1, train_data=QAs, rollout_num=8, 
                 train_batch_size=8, gen_batch_size=4,
                 gen_update_steps=16, trainer='LSCPU', gen_temperature=0.9,
-                gen_device=[1], ref_server="http://10.176.40.138:59876",
+                gen_device=[1], ref_server="http://127.0.0.1:59876",
                 lr=1e-6, accum_steps=16, genlog_filename='rl_log',)
     lsrl.add_reward(format_fn)
     lsrl.add_reward(correct_fn)

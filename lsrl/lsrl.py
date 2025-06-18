@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+
 import json, os, shutil, re, random, io, requests, ctypes, sys, time, struct, types
 import torch
 import torch.nn as nn
@@ -9,8 +9,9 @@ from datetime import datetime
 
 from tqdm import tqdm
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from .utils import tensor_to_bytes, bytes_to_tensor, make_bytes_list, bytes_list_to_list
+from .utils import json_to_bytes_list, bytes_list_to_json
 
 class LSTrainer:
     def __init__(self, model_patch):
@@ -146,17 +147,11 @@ class LSRL:
             r = requests.get(f"{self.ref_server}/get").content
             if r == b'empty': return None
         except: return None
-        dd = bytes_list_to_list(r)
-        data = json.loads(dd[0]) 
-        data['inputs'] = bytes_to_tensor(dd[1])
-        data['rewards'] = bytes_to_tensor(dd[2])
-        data['refs'] = bytes_to_tensor(dd[3])
-        if len(dd) == 5: data['gen_logps'] = bytes_to_tensor(dd[4])
-        return data
-        
+        return bytes_list_to_json(r)
+
     def GRPO_step(self, model, batch):
         def get_per_token_logps(logits, input_ids):
-            per_token_logps = [] # Use a loop to reduce memory peak.
+            per_token_logps = [] 
             for logits_row, input_ids_row in zip(logits, input_ids):
                 log_probs = logits_row.log_softmax(dim=-1)
                 token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
@@ -249,8 +244,7 @@ class LSRL:
             if items is None: break
             if 'end' in items: 
                 print('\nGeneration worker finished, sending end signal to ref server ...')
-                data = [json.dumps({"end":1}).encode()] + [tensor_to_bytes(torch.tensor([0]))] * 4
-                requests.post(f"{self.ref_server}/upload", data=make_bytes_list(data))            
+                requests.post(f"{self.ref_server}/upload", data=json_to_bytes_list({'end':1}))            
                 break
             it += 1
             if it % 2 == 0: try_update_model()
@@ -276,16 +270,15 @@ class LSRL:
                     output_ids = pad_sequence(tensor_list, batch_first=True, padding_value=self.tokenizer.pad_token_id) 
                     Qrep = prompt_ids.repeat(1, output_ids.shape[0]).view(-1, plen)
                     merged_ids = torch.cat([Qrep, output_ids], dim=1)
-                    data = [json.dumps({"plen": plen}).encode(), tensor_to_bytes(merged_ids), tensor_to_bytes(sub_rewards)]       
+                    data = {'plen': plen, 'inputs': merged_ids, 'rewards': sub_rewards}
 
                     if self.compute_gen_logps:
                         zz = vllm_gen.generate(prompt_token_ids=merged_ids.tolist(), sampling_params=gen_logps_sp, use_tqdm=False)
                         zz = [xx.prompt_logprobs[plen:] for xx in zz]
                         gen_logps = torch.tensor([[list(x.values())[0].logprob for x in xx] for xx in zz])
-                        data.append(tensor_to_bytes(gen_logps))
+                        data['gen_logps'] = gen_logps
 
-                    xdata = make_bytes_list(data)
-                    requests.post(f"{self.ref_server}/upload", data=xdata)
+                    requests.post(f"{self.ref_server}/upload", data=json_to_bytes_list(data))
 
 
     def start_gen_worker(self):
