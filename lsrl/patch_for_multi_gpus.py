@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 def decoding_layer_forward(self, hidden_states, attention_mask,
         position_ids, past_key_value, output_attentions, use_cache,
@@ -36,9 +37,29 @@ def decoding_layer_forward(self, hidden_states, attention_mask,
         if output_attentions: outputs += (self_attn_weights,)
         return outputs
 
-def patch_qwen2_for_multi_gpus(model, devices):
+def chunked_lm_head_forward(self, input_ids, labels, use_cache=False, **kwargs):
+    hidden = self.model(input_ids, use_cache=use_cache).last_hidden_state
+    chunk_size = self._lm_head_chunk_size if hasattr(self, '_lm_head_chunk_size') else 1024
+    loss_fct = nn.CrossEntropyLoss(reduction='sum')
+    hiddens = hidden[:,:-1].reshape(-1, hidden.size(-1)).contiguous()
+    labels = labels[:,1:].reshape(-1).contiguous()
+    total_len = hiddens.size(0)
+    real_len = labels.ne(-100).sum().item()
+    for i in range(0, total_len, chunk_size):
+        end = min(i + chunk_size, total_len)
+        logits = self.lm_head(hiddens[i:end])
+        sub_labels = labels[i:end].to(logits.device)
+        loss = loss_fct(logits.float(), sub_labels)
+        total_loss = loss if i == 0 else total_loss + loss
+    loss = total_loss / real_len
+    return CausalLMOutputWithPast(loss=loss)
+
+def patch_qwen2_for_multi_gpus(model, devices, patch_lm_head=False, chunk_size=1024):
     for layer in model.model.layers:
         layer.forward = decoding_layer_forward.__get__(layer, nn.Module)
+    if patch_lm_head:
+        model._lm_head_chunk_size = chunk_size
+        model.forward = chunked_lm_head_forward.__get__(model, nn.Module)
     layers = [model.model.embed_tokens]
     layers += [x for x in model.model.layers]
     layers += [model.model.norm, model.lm_head]
