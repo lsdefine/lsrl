@@ -38,7 +38,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "gradoffload":
 	seq_len, grad_offload = 18000, True
 else: seq_len, grad_offload = 8000, False
 
-print(f"Config: grad\_offload={grad\_offload}, support seq\_len={seq\_len}")
+print(f"Config: grad_offload={grad_offload}, support seq_len={seq_len}")
 
 # Use CPUAdamW optimizer
 opt = DistributedCPUAdamW(model.parameters(), 
@@ -70,7 +70,7 @@ if 'ref' in sys.argv:
 	 sys.exit(0)  
 
 # Prepare training data 
-dataset = load_dataset("meta-math/GSM8K\_zh", "default", split="train") 
+dataset = load_dataset("meta-math/GSM8K_zh", "default", split="train") 
 QAs = [{'Q': x, 'A': y.split('####')[-1].strip()} for x, y in zip(dataset['question_zh'], dataset['answer']) ] 
 random.shuffle(QAs)  
 
@@ -85,7 +85,7 @@ train_batch_size=8, gen_batch_size=4, gen_update_steps=16, trainer='LSCPU',  # U
 lsrl.add_reward(format_reward_fn) 
 lsrl.add_reward(correctness_reward_fn)  
 # Set prompt functions 
-lsrl.set_policy_prompt_fn(make\_prompt_fn) 
+lsrl.set_policy_prompt_fn(make_prompt_fn) 
 lsrl.set_rollout_prompt_fn(make_prompt_fn)  
 # Start training 
 lsrl.train()
