@@ -66,8 +66,8 @@ model_path = "/data2/Qwen/Qwen2.5-14B-Instruct"
 
 # Start Reference Server (can be on different machine) 
 if 'ref' in sys.argv:     
-	RefServer(model_path).start()    
-	 sys.exit(0)  
+    RefServer(model_path).start()    
+    sys.exit(0)  
 
 # Prepare training data 
 dataset = load_dataset("meta-math/GSM8K_zh", "default", split="train") 
@@ -127,6 +127,47 @@ lsrl = LSRL( model_path, trainer='LSCPU',   # CPUAdamW optimizer
 	# trainer='DeepSpeed',   # DeepSpeed also supported 
 )
 ```
+
+## 🚀 Performance Benchmarks
+
+### Experimental Setup
+
+We conducted comprehensive SFT performance benchmarks comparing **LSRL** against **DeepSpeed ZeRO** across different GPU configurations and sequence lengths.
+See examples/benchmark.py
+
+**Test Environment:**
+- Hardware: NVIDIA A800 80GB GPUs
+- Model: Qwen2.5-14B-Instruct (14B parameters)
+- Batch Size: 1 per GPU
+- Gradient Accumulation Steps: 4 (actual) / 256 (estimated)
+- Precision: BF16
+
+**Metrics:**
+- **Forward Time**: Time for forward pass (seconds)
+- **Update Time**: Time for gradient computation + parameter update (seconds)  
+- **Throughput**: Tokens processed per second
+
+### Results Summary
+
+| GPUs | Seq Len | Method | Config | Forward (s) | Update (s) | Throughput accum=4 (tokens/s) | Throughput accum=256 (tokens/s) |
+|------|---------|--------|--------|-------------|------------|---------------------|------------------------|
+| 1 | 4K | DeepSpeed | ZeRO-1 | 2.5 | 28.2 | 447 | 1540 |
+| 1 | 4K | DeepSpeed | ZeRO-2 | 5.8 | 34.1 | 310 | 676 |
+| 1 | 4K | LSRL | no grad offload | 2.5 | 17.4 | 642 | 1568 |
+| 1 | 8K | DeepSpeed | ZeRO-2 | 10.2 | 41.0 | 448 | 777 |
+| 1 | 8K | LSRL | no grad offload | 5.3 | 30.3 | 692 | 1475 |
+| 1 | 10K | DeepSpeed | ZeRO-1 | - | - | B**OOM**! | B**OOM**! |
+| 1 | 10K | DeepSpeed | ZeRO-2 | 10.6 | 40.7 | 552 | 936 |
+| 1 | 10K | LSRL | grad offload | 8.9 | 29.9 | 705 | 1107 |
+| 1 | 18K | DeepSpeed | ZeRO-2 | 18.2 | - | B**OOM**! | B**OOM**! |
+| 1 | 18K⭐ | LSRL | grad offload | 16.2 | 45.4 | 766 | 1102 |
+| 2 | 7.5K | DeepSpeed | ZeRO-1 | 5.2 | 43.9 | 1009 | 2816 |
+| 2 | 7.5K | DeepSpeed | ZeRO-2 | 13.1 | 40.5 | 752 | 1137 |
+| 2 | 7.5K | LSRL | no grad offload | 5.0 | 22.7 | 1595 | 2969 |
+| 2 | 10K | DeepSpeed | ZeRO-1 | - | - | B**OOM**! | B**OOM**! |
+| 2 | 15K | DeepSpeed | ZeRO-2 | 18.9 | 48.9 | 1136 | 1576 |
+| 2 | 18K⭐ | LSRL | grad offload | 16.6 | 39.6 | 1612 | 2157 |
+
 
 ## 📦 Dependencies
 

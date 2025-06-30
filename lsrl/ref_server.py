@@ -38,7 +38,7 @@ class RefServer:
         try: 
             rets = [pred_func(model, input_ids[i:i+sbsz])
                     for i in range(0, input_ids.shape[0], sbsz)]
-            return torch.stack(rets, dim=0) if len(rets) > 1 else rets[0]
+            return torch.cat(rets, dim=0) if len(rets) > 1 else rets[0]
         except torch.cuda.OutOfMemoryError:
             if sbsz == 1: raise Exception('Batch size is 1, cannot reduce further.')
             print('\nOOM, try to reduce batch size...')

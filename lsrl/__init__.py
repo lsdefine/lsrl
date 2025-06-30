@@ -1,3 +1,7 @@
+import torch, transformers
+assert torch.__version__ >= "2.0.0", f"Need PyTorch 2.0+, got {torch.__version__}"
+assert transformers.__version__ >= "4.20.0", f"Need transformers 4.20+, got {transformers.__version__}"
+
 from .lsrl import LSRL, LSTrainer, LSCPUTrainer, DeepSpeedTrainer, GenLogRecorder
 from .cpuadamw import CPUAdamW, DistributedCPUAdamW
 from .ref_server import RefServer
