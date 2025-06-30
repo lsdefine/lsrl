@@ -66,8 +66,8 @@ model_path = "/data2/Qwen/Qwen2.5-14B-Instruct"
 
 # Start Reference Server (can be on different machine) 
 if 'ref' in sys.argv:     
-	RefServer(model_path).start()    
-	 sys.exit(0)  
+    RefServer(model_path).start()    
+    sys.exit(0)  
 
 # Prepare training data 
 dataset = load_dataset("meta-math/GSM8K_zh", "default", split="train") 
