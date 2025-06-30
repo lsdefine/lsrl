@@ -38,7 +38,7 @@ if grad_offload:
 else:
     print('\nRank 0 proc need to do some work, so it starts a bit later.\n')
 
-from lsrl import DistributedCPUAdamW
+from lsrl import DistributedCPUAdamW, save_model
 opt = DistributedCPUAdamW(model.parameters(), lr=1e-5, 
                accum_steps=4, weight_decay=0.01, eps=1e-8, 
                grad_offload=grad_offload)
@@ -53,3 +53,6 @@ for step in range(1, 7):
     print('step time: ', end='')
     if opt.step(): print('update parameters! ')
     print('%.2fs' % (time.time()-tic))
+
+if torch.distributed.get_rank() == 0:
+    save_model("./sft_14b_80g_dp", model, tokenizer=None)

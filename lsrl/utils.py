@@ -39,3 +39,9 @@ def bytes_list_to_json(b):
     tkeys = others.pop('#tensors', [])
     tensors = {k:bytes_to_tensor(v) for k, v in zip(tkeys, blist[1:])}
     return {**others, **tensors}
+
+def save_model(name, model, tokenizer=None):
+    state_dict = model.state_dict()
+    state_dict = type(state_dict)({k: v.cpu() for k, v in state_dict.items()})
+    model.save_pretrained(name, state_dict=state_dict)
+    if tokenizer is not None: tokenizer.save_pretrained(name)

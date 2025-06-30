@@ -11,7 +11,7 @@ from tqdm import tqdm
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from .utils import json_to_bytes_list, bytes_list_to_json
+from .utils import json_to_bytes_list, bytes_list_to_json, save_model
 
 class LSTrainer:
     def __init__(self, model_patch):
@@ -84,7 +84,6 @@ class GenLogRecorder:
         if not hasattr(self, 'md_file'): self.parpare()
         answers_texts = [x['text'] for x in samples]
         tokens_lens = [len(x['token_ids']) for x in samples]
-        ts = datetime.now().isoformat()
         self.md_file.write(f"## Iter {iteration}\n\n**Input:** {str(question)}\n\n")
         for i, (ans, r, tok) in enumerate(zip(answers_texts, rewards, tokens_lens)):
             parts = [f"total: {r['total']:.2f}"] + [f"{k}: {v:.2f}" if isinstance(v, (int, float)) else f"{k}: {v}" 
@@ -102,7 +101,8 @@ class LSRL:
     def __init__(self, model_path, epochs=1, rollout_num=8, train_data=None, trainer='LSCPU',
                  gen_device=4, train_batch_size=2, gen_update_steps=16, save_steps=200, gen_batch_size=1,
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
-                 gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, **kwargs):
+                 gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
+                 **kwargs):
         self.model_path = model_path
         self.gen_device = [gen_device] if isinstance(gen_device, int) else list(gen_device)
         # GPU device for generation, don't put it in CUDA_VISIBLE_DEVICES with deepspeed
@@ -126,6 +126,8 @@ class LSRL:
         self.clip_param = clip_param
         self.reward_fns = []
         self.genlog_recorder = GenLogRecorder(genlog_filename) if genlog_filename else None
+        self.reward_processor = reward_processor 
+        assert reward_processor in ['base', 'async'], "rollout_processor must be 'base' or 'async'"
 
         if trainer == 'LSCPU':
             self.trainer = LSCPUTrainer(model_path, **kwargs)
@@ -208,14 +210,8 @@ class LSRL:
         def gen_samples(items):
             gen_prompts = [self.rollout_prompt_fn(x) for x in items]
             answers = self.generate(vllm_gen, gen_prompts)
-            rewards = []
-            for i, ans in enumerate(answers):
-                reward = {}
-                for reward_fn in self.reward_fns: reward[reward_fn.__name__] = reward_fn(ans['text'], items[i // self.rollout_num])
-                reward['total'] = sum(reward.values())
-                rewards.append(reward)
             policy_prompts = [self.policy_prompt_fn(x) for x in items]
-            return {'prompts': policy_prompts, 'answers': answers, 'rewards': rewards}
+            return {'prompts': policy_prompts, 'answers': answers}
 
         def QueueGetNowait(Q):
             try: return Q.get_nowait()
@@ -234,51 +230,139 @@ class LSRL:
                 llm_model.load_weights(new_state_dict.items())
                 print(f'[VLLM PROC {gen_rank}] model updated')
             del new_state_dict
+
+        def compute_gen_logps(data):
+            if self.compute_gen_logps:
+                plen = data['plen']
+                zz = vllm_gen.generate(prompt_token_ids=data['inputs'].tolist(), sampling_params=gen_logps_sp, use_tqdm=False)
+                zz = [xx.prompt_logprobs[plen:] for xx in zz]
+                gen_logps = torch.tensor([[list(x.values())[0].logprob for x in xx] for xx in zz])
+                data['gen_logps'] = gen_logps
+
+        def make_batch_inputs(prompt_ids, sub_ans_ids):
+            plen = prompt_ids.shape[1]
+            tensor_list = [torch.tensor(lst) for lst in sub_ans_ids]
+            output_ids = pad_sequence(tensor_list, batch_first=True, padding_value=self.tokenizer.pad_token_id) 
+            Qrep = prompt_ids.repeat(1, output_ids.shape[0]).view(-1, plen)
+            merged_ids = torch.cat([Qrep, output_ids], dim=1)
+            return merged_ids
+        
+        def gen_rewards(samples, items):
+            rewards = []
+            for i, ans in enumerate(samples['answers']):
+                reward = {}
+                for reward_fn in self.reward_fns:
+                    reward[reward_fn.__name__] = reward_fn(ans['text'], items[i//self.rollout_num])
+                reward['total'] = sum(reward.values())
+                rewards.append(reward)
+            return rewards
+
+        class RolloutProcessorBase:
+            def __init__(self, lsrl): 
+                self.lsrl = lsrl
+            def run(self, items):
+                rn, tbsz = self.lsrl.rollout_num, self.lsrl.train_batch_size
+                samples = gen_samples(items)
+                samples['rewards'] = gen_rewards(samples, items)
+                groups = {
+                    'answers': [samples['answers'][i*rn:(i+1)*rn] for i in range(len(items))],
+                    'rewards': [samples['rewards'][i*rn:(i+1)*rn] for i in range(len(items))]
+                }
+                group_avg_rewards = []
+                for prompt, ganswers, grewards in zip(samples['prompts'], groups['answers'], groups['rewards']):
+                    prompt_ids = self.lsrl.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"]
+                    curr_ans_ids = [x['token_ids'] for x in ganswers]
+                    curr_rewards = torch.tensor([x['total'] for x in grewards], dtype=torch.float32)
+                    group_avg_rewards.append(f'{curr_rewards.mean().item():.2f}')
+                    if curr_rewards.max() - curr_rewards.min() < 1e-4: continue
+                    curr_rewards = (curr_rewards - curr_rewards.mean()) / (curr_rewards.std() + 1e-4)
+                    for ii in range(0, rn, tbsz):
+                        data = {
+                            'plen': prompt_ids.shape[1],
+                            'inputs': make_batch_inputs(prompt_ids, curr_ans_ids[ii:ii+tbsz]),
+                            'rewards': curr_rewards[ii:ii+tbsz]
+                        }
+                        compute_gen_logps(data)
+                        requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
+                return {'samples':samples, 'group_avg_rewards': group_avg_rewards}
+    
+        class RolloutProcessorAsync(RolloutProcessorBase):
+            def __init__(self, lsrl):
+                super().__init__(lsrl)
+                import queue, threading
+                self.sample_queue = queue.Queue()
+                self.result_queue = queue.Queue()
+                threading.Thread(target=self._reward_worker, daemon=True).start()  
+
+            def _reward_worker(self):
+                while True:
+                    task = self.sample_queue.get()
+                    if task is None: break
+                    self.result_queue.put(gen_rewards(task['samples'], task['items']))
+
+            def run(self, items):
+                rn, tbsz = self.lsrl.rollout_num, self.lsrl.train_batch_size
+                samples = gen_samples(items)
+                self.sample_queue.put({'samples': samples, 'items': items}) 
+                groups = {'answers': [samples['answers'][i*rn:(i+1)*rn] for i in range(len(items))]}
+                batches = []
+                for prompt, ganswers in zip(samples['prompts'], groups['answers']):
+                    prompt_ids = self.lsrl.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"]
+                    curr_ans_ids = [x['token_ids'] for x in ganswers]
+                    for ii in range(0, rn, tbsz):         
+                        data = {
+                            'plen': prompt_ids.shape[1],
+                            'inputs': make_batch_inputs(prompt_ids, curr_ans_ids[ii:ii+tbsz])
+                        }
+                        compute_gen_logps(data)
+                        batches.append(data)
+                samples['rewards'] = self.result_queue.get()
+                groups['rewards'] = [samples['rewards'][i*rn:(i+1)*rn] for i in range(len(items))]
+                group_avg_rewards = []
+                batch_id = 0
+                for grewards in groups['rewards']:
+                    curr_rewards = torch.tensor([x['total'] for x in grewards], dtype=torch.float32)
+                    group_avg_rewards.append(f'{curr_rewards.mean().item():.2f}')
+                    bad = curr_rewards.max() - curr_rewards.min() < 1e-4
+                    curr_rewards = (curr_rewards - curr_rewards.mean()) / (curr_rewards.std() + 1e-4)
+                    for ii in range(0, rn, tbsz): 
+                        if not bad: batches[batch_id]['rewards'] = curr_rewards[ii:ii+tbsz]
+                        batch_id += 1
+
+                for data in batches:
+                    if 'rewards' not in data: continue
+                    requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
+                return {'samples':samples, 'group_avg_rewards': group_avg_rewards}
+
             
-        rn = self.rollout_num
-        tbsz = self.train_batch_size
+        rn = self.rollout_num 
         from torch.nn.utils.rnn import pad_sequence
-        it = 0
-        while True:
+        
+        ROLLOUT_PROCESSORS = {
+            'base': RolloutProcessorBase,
+            'async': RolloutProcessorAsync
+        }
+        RolloutProcessor = ROLLOUT_PROCESSORS[self.reward_processor]
+        RP = RolloutProcessor(self)
+        for it in range(99999999): # while True
             items = QueueGetNowait(Q_data)
             if items is None: break
             if 'end' in items: 
                 print('\nGeneration worker finished, sending end signal to ref server ...')
+                time.sleep(5)
                 requests.post(f"{self.ref_server}/upload", data=json_to_bytes_list({'end':1}))            
                 break
-            it += 1
+
             if it % 2 == 0: try_update_model()
+
             tic = time.time()
             items = items['batch']
-            samples = gen_samples(items)
+            rr = RP.run(items)
+            samples = rr['samples']
+            group_avg_rewards = rr['group_avg_rewards']
             if gen_rank == 0 and self.genlog_recorder:
                 self.genlog_recorder.log(it, items[0], samples['answers'][:rn], samples['rewards'][:rn])
-                # only log the first item in the batch for simplicity
-            for i, _ in enumerate(items):
-                prompt_ids = self.tokenizer(samples['prompts'][i], return_tensors="pt", add_special_tokens=False)["input_ids"]
-                plen = prompt_ids.shape[1]
-                curr_ans_ids = [x['token_ids'] for x in samples['answers'][i*rn:(i+1)*rn]]
-                curr_rewards = torch.tensor([x['total'] for x in samples['rewards'][i*rn:(i+1)*rn]], dtype=torch.float32)
-                if i == 0: print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {curr_rewards.mean().item():.2f}' )
-                if curr_rewards.max() - curr_rewards.min() < 1e-4: continue
-                curr_rewards = (curr_rewards - curr_rewards.mean()) / (curr_rewards.std() + 1e-4)
-
-                for ii in range(0, len(curr_ans_ids), tbsz):
-                    sub_rewards = curr_rewards[ii:ii+tbsz]
-                    sub_ans_ids = curr_ans_ids[ii:ii+tbsz]
-                    tensor_list = [torch.tensor(lst) for lst in sub_ans_ids]
-                    output_ids = pad_sequence(tensor_list, batch_first=True, padding_value=self.tokenizer.pad_token_id) 
-                    Qrep = prompt_ids.repeat(1, output_ids.shape[0]).view(-1, plen)
-                    merged_ids = torch.cat([Qrep, output_ids], dim=1)
-                    data = {'plen': plen, 'inputs': merged_ids, 'rewards': sub_rewards}
-
-                    if self.compute_gen_logps:
-                        zz = vllm_gen.generate(prompt_token_ids=merged_ids.tolist(), sampling_params=gen_logps_sp, use_tqdm=False)
-                        zz = [xx.prompt_logprobs[plen:] for xx in zz]
-                        gen_logps = torch.tensor([[list(x.values())[0].logprob for x in xx] for xx in zz])
-                        data['gen_logps'] = gen_logps
-
-                    requests.post(f"{self.ref_server}/upload", data=json_to_bytes_list(data))
+            print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {','.join(group_avg_rewards)}' )
 
 
     def start_gen_worker(self):
@@ -332,7 +416,4 @@ class LSRL:
                 if self.rank == 0:
                     print('saving model')
                     save_name = f"./step_{step}"
-                    state_dict = self.trainer.get_model().state_dict()
-                    state_dict = type(state_dict)({k: v.cpu() for k, v in state_dict.items()})
-                    self.trainer.get_model().save_pretrained(save_name, state_dict=state_dict)
-                    self.tokenizer.save_pretrained(save_name)
+                    save_model(save_name, self.trainer.get_model(), self.tokenizer)
