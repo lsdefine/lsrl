@@ -128,7 +128,7 @@ lsrl = LSRL( model_path, trainer='LSCPU',   # CPUAdamW optimizer
 )
 ```
 
-## 🚀 Performance Benchmarks
+## 🚀 SFT Performance Benchmarks
 
 ### Experimental Setup
 
