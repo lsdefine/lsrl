@@ -41,7 +41,7 @@ else: seq_len, grad_offload = 8000, False
 print(f"Config: grad_offload={grad_offload}, support seq_len={seq_len}")
 
 # Use CPUAdamW optimizer
-opt = DistributedCPUAdamW(model.parameters(), 
+opt = CPUAdamW(model.parameters(), 
 	lr=1e-5, accum_steps=4, weight_decay=0.01, 
 	eps=1e-8, grad_offload=grad_offload)
 
