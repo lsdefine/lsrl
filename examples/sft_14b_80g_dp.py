@@ -38,8 +38,9 @@ if grad_offload:
 else:
     print('\nRank 0 proc need to do some work, so it starts a bit later.\n')
 
-from lsrl import DistributedCPUAdamW, save_model
-opt = DistributedCPUAdamW(model.parameters(), lr=1e-5, 
+from lsrl import CPUAdamW, save_model
+# CPUAdamW will automatically switch to DistributedCPUAdamW if torch.distributed is initialized
+opt = CPUAdamW(model.parameters(), lr=1e-5, 
                accum_steps=4, weight_decay=0.01, eps=1e-8, 
                grad_offload=grad_offload)
 

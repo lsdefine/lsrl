@@ -102,6 +102,7 @@ class LSRL:
                  gen_device=4, train_batch_size=2, gen_update_steps=16, save_steps=200, gen_batch_size=1,
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
+                 max_pending_samples=40,
                  **kwargs):
         self.model_path = model_path
         self.gen_device = [gen_device] if isinstance(gen_device, int) else list(gen_device)
@@ -128,6 +129,7 @@ class LSRL:
         self.genlog_recorder = GenLogRecorder(genlog_filename) if genlog_filename else None
         self.reward_processor = reward_processor 
         assert reward_processor in ['base', 'async'], "rollout_processor must be 'base' or 'async'"
+        self.max_pending_samples = max_pending_samples
 
         if trainer == 'LSCPU':
             self.trainer = LSCPUTrainer(model_path, **kwargs)
@@ -283,8 +285,10 @@ class LSRL:
                             'rewards': curr_rewards[ii:ii+tbsz]
                         }
                         compute_gen_logps(data)
-                        requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
-                return {'samples':samples, 'group_avg_rewards': group_avg_rewards}
+                        rc = requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
+                try: remain_cnt = rc.json().get('remain_cnt', 0)
+                except: remain_cnt = 0
+                return {'samples':samples, 'group_avg_rewards': group_avg_rewards, 'remain_cnt': remain_cnt}
     
         class RolloutProcessorAsync(RolloutProcessorBase):
             def __init__(self, lsrl):
@@ -331,8 +335,10 @@ class LSRL:
 
                 for data in batches:
                     if 'rewards' not in data: continue
-                    requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
-                return {'samples':samples, 'group_avg_rewards': group_avg_rewards}
+                    rc = requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
+                try: remain_cnt = rc.json().get('remain_cnt', 0)
+                except: remain_cnt = 0
+                return {'samples':samples, 'group_avg_rewards': group_avg_rewards, 'remain_cnt': remain_cnt}
 
             
         rn = self.rollout_num 
@@ -363,6 +369,9 @@ class LSRL:
             if gen_rank == 0 and self.genlog_recorder:
                 self.genlog_recorder.log(it, items[0], samples['answers'][:rn], samples['rewards'][:rn])
             print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {','.join(group_avg_rewards)}' )
+            if rr['remain_cnt'] > self.max_pending_samples: 
+                print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
+                time.sleep(10)
 
 
     def start_gen_worker(self):

@@ -54,7 +54,7 @@ class RefServer:
             dd = request.body.read()
             data = bytes_list_to_json(dd)
             self.raw_queue.put(data)
-            return b'tensor'
+            return json.dumps({'remain_cnt': self.result_queue.qsize()})
 
         @self.app.route('/get', method='GET')
         def do_get():

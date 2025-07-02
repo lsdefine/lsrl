@@ -1,11 +1,21 @@
 import torch, time, os
 from torch.optim import Optimizer, AdamW 
+import torch.distributed as dist
 
 class CPUAdamW(Optimizer):  
+    def __new__(cls, *args, **kwargs):
+        if dist.is_available() and dist.is_initialized():
+            return DistributedCPUAdamW(*args, **kwargs)
+        else:
+            return SoloCPUAdamW(*args, **kwargs)
+
+class SoloCPUAdamW(Optimizer):  
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,  
-                 weight_decay=0.0, accum_steps=1, grad_offload=None, **kwargs):  
+                 weight_decay=0.0, accum_steps=1, grad_offload=None, verbose=False,
+                 **kwargs):     
         self.accum_steps = accum_steps  
         self.current_step = 0  
+        self.verbose = verbose
 
         params = list(params)   
         if grad_offload is None:
@@ -37,7 +47,7 @@ class CPUAdamW(Optimizer):
         self.state = self.cpu_optimizer.state  
 
     @torch.no_grad()  
-    def step(self, closure=None):  
+    def step(self):  
         self.current_step += 1  
         is_update_step = self.current_step >= self.accum_steps  
         if self.grad_offload or is_update_step:
@@ -78,16 +88,17 @@ class CPUAdamW(Optimizer):
 
     def sync_gpu_params(self):  
          for cpu_p, original_p in self.original_device_map.items():  
-             original_p.data.copy_(cpu_p.data)  
-             
+             original_p.data.copy_(cpu_p.data)             
 
 class DistributedCPUAdamW(Optimizer):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0.0, accum_steps=1, grad_offload=None, **kwargs):
+                 weight_decay=0.0, accum_steps=1, grad_offload=None, verbose=False,
+                 **kwargs):
         if int(os.environ.get('OMP_NUM_THREADS', 1)) < 10:
             print("\n\nWarning: OMP_NUM_THREADS is set to a low value, which may cause performance issues. Consider setting it to 10 or higher.")
         self.accum_steps = accum_steps  
         self.current_step = 0  
+        self.verbose = verbose
         self.rank = torch.distributed.get_rank()
         params = list(params)  
 
@@ -143,12 +154,12 @@ class DistributedCPUAdamW(Optimizer):
             if self.rank == 0:
                 tic = time.time()
                 self.cpu_optimizer.step()  
-                print(f"CPU optimizer step took {time.time() - tic:.2f} seconds")
+                if self.verbose: print(f"CPU optimizer step took {time.time() - tic:.2f} seconds")
                 tic = time.time()
                 for cpu_p, original_p in self.original_device_map.items():  
                     original_p.data.copy_(cpu_p.data, non_blocking=True)  
                 torch.cuda.synchronize()
-                print(f"Data copy took {time.time() - tic:.2f} seconds")
+                if self.verbose: print(f"Data copy took {time.time() - tic:.2f} seconds")
                 self.cpu_optimizer.zero_grad()  
             torch.distributed.barrier()
             tic = time.time()
@@ -157,7 +168,7 @@ class DistributedCPUAdamW(Optimizer):
                 handle = torch.distributed.broadcast(p.data, src=0, async_op=True)
                 handles.append(handle)
             for handle in handles: handle.wait()
-            if self.rank == 0:
+            if self.rank == 0 and self.verbose:
                 print(f"Distributed step took {time.time() - tic:.2f} seconds")
             self.current_step = 0  
         return is_update_step  
