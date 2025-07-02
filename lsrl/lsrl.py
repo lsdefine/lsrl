@@ -11,7 +11,7 @@ from tqdm import tqdm
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from .utils import json_to_bytes_list, bytes_list_to_json, save_model
+from .utils import json_to_bytes_list, bytes_list_to_json, save_model, enable_gradient_checkpointing
 
 class LSTrainer:
     def __init__(self, model_patch):
@@ -22,11 +22,12 @@ class LSTrainer:
     def get_model(self): return self.model
 
 class LSCPUTrainer(LSTrainer):
-    def __init__(self, model_patch, lr=1e-6, accum_steps=16, grad_offload=False):
+    def __init__(self, model_patch, lr=1e-6, accum_steps=16, grad_offload=False, gradient_checkpointing_ratio=1):
         super().__init__(model_patch)
         self.model.to('cuda')
         self.device = self.model.device
         self.model.gradient_checkpointing_enable()
+        enable_gradient_checkpointing(self.model, gradient_checkpointing_ratio)
         from .cpuadamw import CPUAdamW, DistributedCPUAdamW
         if dist.is_initialized(): CPUAdamW = DistributedCPUAdamW
         self.opt = CPUAdamW(self.model.parameters(), lr=lr, accum_steps=accum_steps, grad_offload=grad_offload)
@@ -114,8 +115,16 @@ class LSRL:
         self.gen_batch_size = gen_batch_size
         self.epochs = epochs
         self.all_steps = epochs * len(train_data) * rollout_num // train_batch_size
-        self.train_batch_size = train_batch_size
-        assert rollout_num % train_batch_size == 0, "rollout_num must be divisible by train_batch_size"
+
+        if train_batch_size > rollout_num:
+            assert train_batch_size % rollout_num == 0, "train_batch_size must be divisible by rollout_num"
+            self.num_mix_forward_batches = train_batch_size // rollout_num
+            self.train_batch_size = rollout_num
+        else:
+            assert rollout_num % train_batch_size == 0, "rollout_num must be divisible by train_batch_size"
+            self.train_batch_size = train_batch_size
+            self.num_mix_forward_batches = 1
+
         self.gen_update_steps = gen_update_steps
         self.save_steps = save_steps
         self.compute_gen_logps = compute_gen_logps
@@ -165,8 +174,11 @@ class LSRL:
         prompt_length = batch['plen']
         inputs = batch['inputs'].to(self.device)
         advantages = batch['rewards'].to(self.device).unsqueeze(1)
-        logits = model(inputs, use_cache=False).logits
-        logits = logits[:, :-1, :]  
+        if '#computed_logits' not in batch:
+            logits = model(inputs, use_cache=False).logits
+            logits = logits[:, :-1, :]  
+        else:
+            logits = batch['#computed_logits'].to(self.device)
         input_ids = inputs[:, 1:]  
         per_token_logps = get_per_token_logps(logits, input_ids)
         per_token_logps = per_token_logps[:,prompt_length-1:]
@@ -203,6 +215,7 @@ class LSRL:
 
     def gen_worker(self, Q_data, Q_state_dict, gen_device, gen_rank=0):
         os.environ["CUDA_VISIBLE_DEVICES"] = f'{gen_device}'
+        os.environ["VLLM_USE_V1"] = "0"
         torch.cuda.set_device(0)
         print(f"Generation worker process uses GPU {gen_device}")
         from vllm import LLM, SamplingParams
@@ -389,28 +402,61 @@ class LSRL:
             p = ctx.Process(target=self.gen_worker, args=(self.Q_data, self.Q_state_dict, gendevice, it))
             p.start()
 
+    def merge_mixed_length_batches(self, batches):
+        max_plen = max(b['plen'] for b in batches)
+        pad_specs = [(b, max_plen - b['plen'], b['inputs'].shape[1] + max_plen - b['plen']) 
+                 for b in batches]
+        max_final_len = max(spec[2] for spec in pad_specs)
+        all_inputs = []; pad_offsets = []  
+        for batch, prompt_pad, new_len in pad_specs:
+            end_pad = max_final_len - new_len
+            padded_input = torch.nn.functional.pad(batch['inputs'], (prompt_pad, end_pad), value=self.tokenizer.pad_token_id)
+            all_inputs.append(padded_input)
+            pad_offsets.append(prompt_pad)
+        return torch.cat(all_inputs, dim=0), pad_offsets
+    
+    def mix_forward_and_cut(self, model, batches):
+        inputs, pad_offsets = self.merge_mixed_length_batches(batches)
+        inputs = inputs.to(self.device)
+        logits = model(inputs, use_cache=False).logits
+        logits = logits[:, :-1, :] 
+        start_idx = 0
+        for batch, pad_offset in zip(batches, pad_offsets):
+            bsz = batch['inputs'].shape[0]
+            orig_seq_len = batch['inputs'].shape[1] - 1  
+            batch_logits = logits[start_idx:start_idx + bsz, pad_offset:pad_offset+orig_seq_len]
+            batch['#computed_logits'] = batch_logits
+            start_idx += bsz
+        return inputs.shape
+
     def train(self):
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         if self.rank == 0: self.start_gen_worker()
 
+        def get_batch_with_waiting():
+            batch = self.get_batch()
+            while batch is None:
+                print('[TRAIN] waiting for batch...'); time.sleep(10)
+                batch = self.get_batch()
+            return batch
+        
         self.device = self.trainer.device
         progress = range(1, self.all_steps+1)
         if self.rank == 0: progress = tqdm(progress)
-        for step in progress:
-            batch = self.get_batch()
-            while batch is None:
-                print('[TRAIN] waiting for batch...'); time.sleep(5)
-                batch = self.get_batch()
-            if 'end' in batch: break
 
+        assert self.num_mix_forward_batches == 1, "mix_forward_batches does not faster"
+        for step in progress:
+            batch = get_batch_with_waiting()
+            if 'end' in batch: break
+            
             tic = time.time()
             loss = self.GRPO_step(self.trainer.engine, batch)
             self.trainer.backward(loss)
             self.trainer.step()
 
             if self.rank == 0:
-                progress.set_description(f"Loss: {loss.item():.6f}")
                 print(f'[TRAIN] step: {step},  BATCH shape', batch['inputs'].shape, f'  time: {time.time()-tic:.2f}s')
+                progress.set_description(f"Loss: {loss.item():.6f}")
 
             if step % self.gen_update_steps == 0:
                 distbarrier()
@@ -426,3 +472,4 @@ class LSRL:
                     print('saving model')
                     save_name = f"./step_{step}"
                     save_model(save_name, self.trainer.get_model(), self.tokenizer)
+

@@ -60,7 +60,7 @@ class RefServer:
         def do_get():
             if self.result_queue.empty(): return b'empty'
             return self.result_queue.get()
-        bottle.run(self.app, host='0.0.0.0', port=self.port, server='tornado')
+        bottle.run(self.app, host=self.host, port=self.port, server='tornado')
 
     def start(self):
         threading.Thread(target=self.run_server, daemon=False).start()

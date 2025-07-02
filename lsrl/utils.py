@@ -45,3 +45,13 @@ def save_model(name, model, tokenizer=None):
     state_dict = type(state_dict)({k: v.cpu() for k, v in state_dict.items()})
     model.save_pretrained(name, state_dict=state_dict)
     if tokenizer is not None: tokenizer.save_pretrained(name)
+
+def enable_gradient_checkpointing(model, ratio=1):
+    model.train()
+    model.gradient_checkpointing_enable()
+    if ratio >= 1: return
+    layers = model.model.layers
+    total_layers = len(layers)
+    start_idx = total_layers - int(total_layers * ratio)
+    for i, layer in enumerate(layers):
+        layer.gradient_checkpointing = i >= start_idx
