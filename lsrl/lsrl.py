@@ -368,7 +368,7 @@ class LSRL:
             group_avg_rewards = rr['group_avg_rewards']
             if gen_rank == 0 and self.genlog_recorder:
                 self.genlog_recorder.log(it, items[0], samples['answers'][:rn], samples['rewards'][:rn])
-            print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {','.join(group_avg_rewards)}' )
+            print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {",".join(group_avg_rewards)}' )
             if rr['remain_cnt'] > self.max_pending_samples: 
                 print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
                 time.sleep(10)
