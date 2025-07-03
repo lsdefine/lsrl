@@ -6,6 +6,7 @@ from .lsrl import LSRL, LSTrainer, LSCPUTrainer, DeepSpeedTrainer, GenLogRecorde
 from .cpuadamw import CPUAdamW, DistributedCPUAdamW
 from .ref_server import RefServer
 from .reward_server import RewardServer
+from .dataloader import SFTDataHandler
 from .patch_for_multi_gpus import patch_qwen2_for_multi_gpus
 from .utils import save_model, json_to_bytes_list, bytes_list_to_json, enable_gradient_checkpointing
 
@@ -15,3 +16,4 @@ __all__ = ["LSRL", "LSTrainer", "LSCPUTrainer", "DeepSpeedTrainer",
 
 __all__ += ["patch_qwen2_for_multi_gpus", "save_model", "json_to_bytes_list", "bytes_list_to_json"]
 __all__ += ["enable_gradient_checkpointing"]
+__all__ += ["SFTDataHandler"]
