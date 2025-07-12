@@ -115,6 +115,7 @@ class LSRL:
         self.gen_batch_size = gen_batch_size
         self.epochs = epochs
         self.all_steps = epochs * len(train_data) * rollout_num // train_batch_size
+        self._hooks = {}
 
         if train_batch_size > rollout_num:
             assert train_batch_size % rollout_num == 0, "train_batch_size must be divisible by rollout_num"
@@ -147,6 +148,12 @@ class LSRL:
         else:
             raise ValueError("Unsupported trainer type. Use 'LSCPU' or 'DeepSpeed'.")
     
+    def set_hook(self, name, func): self._hooks[name] = func
+    def set_hooks(self, **hooks): self._hooks.update(hooks)
+    def call_hook(self, name, *args, **kwargs):
+        if name in self._hooks: return self._hooks[name](self, *args,**kwargs)
+        return None
+
     def add_reward(self, reward_fn):
         self.reward_fns.append(reward_fn)
 
@@ -385,7 +392,7 @@ class LSRL:
             if rr['remain_cnt'] > self.max_pending_samples: 
                 print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
                 time.sleep(10)
-
+            self.call_hook('after_rollout', samples)
 
     def start_gen_worker(self):
         print('\nSTART vLLM generation...\n')
