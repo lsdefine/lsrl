@@ -13,18 +13,28 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from .utils import json_to_bytes_list, bytes_list_to_json, save_model, enable_gradient_checkpointing
 
+def get_world_size(): return int(os.environ.get('WORLD_SIZE', 1))
+
 class LSTrainer:
     def __init__(self, model_patch):
         self.model = AutoModelForCausalLM.from_pretrained(model_patch, torch_dtype=torch.bfloat16)
         self.model.train()
-    def backward(self, loss): loss.backward()
+    def backward(self, loss): 
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
     def step(self): self.opt.step()
     def get_model(self): return self.model
 
 class LSCPUTrainer(LSTrainer):
     def __init__(self, model_patch, lr=1e-6, accum_steps=16, grad_offload=False, gradient_checkpointing_ratio=1):
         super().__init__(model_patch)
-        self.model.to('cuda')
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        if get_world_size() > 1:
+            torch.distributed.init_process_group(backend='nccl')
+            torch.cuda.set_device(local_rank)
+            device = torch.device('cuda', local_rank)
+        else: device = 'cuda'
+        self.model.to(device)
         self.device = self.model.device
         self.model.gradient_checkpointing_enable()
         enable_gradient_checkpointing(self.model, gradient_checkpointing_ratio)
@@ -114,7 +124,7 @@ class LSRL:
         self.train_data = train_data
         self.gen_batch_size = gen_batch_size
         self.epochs = epochs
-        self.all_steps = epochs * len(train_data) * rollout_num // train_batch_size
+        self.all_steps = epochs * len(train_data) * rollout_num // train_batch_size // get_world_size()
         self._hooks = {}
 
         if train_batch_size > rollout_num:
@@ -223,8 +233,24 @@ class LSRL:
     def gen_worker(self, Q_data, Q_state_dict, gen_device, gen_rank=0):
         os.environ["CUDA_VISIBLE_DEVICES"] = f'{gen_device}'
         os.environ["VLLM_USE_V1"] = "0"
+        cleanup_keys = [  
+            'RANK', 'WORLD_SIZE', 'MASTER_ADDR', 'MASTER_PORT', 'LOCAL_RANK',  
+            'LOCAL_WORLD_SIZE', 'GROUP_RANK', 'ROLE_RANK', 'ROLE_NAME',   
+            'GROUP_WORLD_SIZE', 'ROLE_WORLD_SIZE',  
+            'TORCHELASTIC_RESTART_COUNT', 'TORCHELASTIC_MAX_RESTARTS',  
+            'TORCHELASTIC_RUN_ID', 'TORCHELASTIC_USE_AGENT_STORE',  
+            'TORCHELASTIC_ERROR_FILE',  
+            'TORCH_NCCL_ASYNC_ERROR_HANDLING',  
+            'NCCL_COMM_ID', 'NCCL_DEBUG', 'NCCL_SOCKET_IFNAME',  
+        ]  
+        for key in cleanup_keys: os.environ.pop(key, None)
+        
         torch.cuda.set_device(0)
-        print(f"Generation worker process uses GPU {gen_device}")
+        print(f"[GEN {gen_rank}] Generation worker process uses GPU {gen_device}")
+        print(f"[GEN {gen_rank}] CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+        print(f"[GEN {gen_rank}] PID: {os.getpid()}")
+        print(f'[GEN {gen_rank}]', os.environ)
+
         from vllm import LLM, SamplingParams
         vllm_gen = LLM(model=self.model_path, enable_chunked_prefill=True, gpu_memory_utilization=0.5)
         gen_logps_sp = SamplingParams(temperature=0, top_p=1, max_tokens=1, prompt_logprobs=1)
@@ -372,27 +398,32 @@ class LSRL:
         RP = RolloutProcessor(self)
         for it in range(99999999): # while True
             items = QueueGetNowait(Q_data)
-            if items is None: break
+            if items is None: 
+                time.sleep(1)
+                items = QueueGetNowait(Q_data)
+                if items is None: break
             if 'end' in items: 
-                print('\nGeneration worker finished, sending end signal to ref server ...')
+                print(f'\n[GEN {gen_rank}] Generation worker finished, sending end signal to ref server ...')
                 time.sleep(5)
                 requests.post(f"{self.ref_server}/upload", data=json_to_bytes_list({'end':1}))            
                 break
 
-            if it % 2 == 0: try_update_model()
-
-            tic = time.time()
-            items = items['batch']
-            rr = RP.run(items)
-            samples = rr['samples']
-            group_avg_rewards = rr['group_avg_rewards']
-            if gen_rank == 0 and self.genlog_recorder:
-                self.genlog_recorder.log(it, items[0], samples['answers'][:rn], samples['rewards'][:rn])
-            print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {",".join(group_avg_rewards)}' )
-            self.call_hook('after_rollout', samples)
-            if rr['remain_cnt'] > self.max_pending_samples: 
-                print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
-                time.sleep(10)
+            try:
+                if it % 2 == 0: try_update_model()
+                tic = time.time()
+                items = items['batch']
+                rr = RP.run(items)
+                samples = rr['samples']
+                group_avg_rewards = rr['group_avg_rewards']
+                if gen_rank == 0 and self.genlog_recorder:
+                    self.genlog_recorder.log(it, items[0], samples['answers'][:rn], samples['rewards'][:rn])
+                print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {",".join(group_avg_rewards)}' )
+                self.call_hook('after_rollout', samples)
+                if rr['remain_cnt'] > self.max_pending_samples: 
+                    print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
+                    time.sleep(10)
+            except Exception as e:
+                print(f'[GEN {gen_rank}] Error in generation worker: {e}')
 
     def start_gen_worker(self):
         print('\nSTART vLLM generation...\n')
