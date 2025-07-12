@@ -511,3 +511,12 @@ class LSRL:
                     save_name = f"./step_{step}"
                     save_model(save_name, self.trainer.get_model(), self.tokenizer)
 
+        print('\n\nSome groups had same rewards and skipped, so the training steps may be less than expected.\n')
+
+        # Final save after training
+        if step % self.gen_update_steps != 0:
+            distbarrier()
+            if self.rank == 0:
+                print('saving model')
+                save_name = f"./step_{step}"
+                save_model(save_name, self.trainer.get_model(), self.tokenizer)
