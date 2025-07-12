@@ -151,7 +151,7 @@ class LSRL:
     def set_hook(self, name, func): self._hooks[name] = func
     def set_hooks(self, **hooks): self._hooks.update(hooks)
     def call_hook(self, name, *args, **kwargs):
-        if name in self._hooks: return self._hooks[name](self, *args,**kwargs)
+        if name in self._hooks: return self._hooks[name](*args, **kwargs)
         return None
 
     def add_reward(self, reward_fn):
@@ -389,10 +389,10 @@ class LSRL:
             if gen_rank == 0 and self.genlog_recorder:
                 self.genlog_recorder.log(it, items[0], samples['answers'][:rn], samples['rewards'][:rn])
             print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {",".join(group_avg_rewards)}' )
+            self.call_hook('after_rollout', samples)
             if rr['remain_cnt'] > self.max_pending_samples: 
                 print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
                 time.sleep(10)
-            self.call_hook('after_rollout', samples)
 
     def start_gen_worker(self):
         print('\nSTART vLLM generation...\n')
