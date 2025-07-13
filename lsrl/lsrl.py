@@ -113,7 +113,7 @@ class LSRL:
                  gen_device=4, train_batch_size=2, gen_update_steps=16, save_steps=200, gen_batch_size=1,
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
-                 max_pending_samples=40,
+                 max_pending_samples=40, skip_zero_groups=False,
                  **kwargs):
         self.model_path = model_path
         self.gen_device = [gen_device] if isinstance(gen_device, int) else list(gen_device)
@@ -136,6 +136,7 @@ class LSRL:
             self.train_batch_size = train_batch_size
             self.num_mix_forward_batches = 1
 
+        self.skip_zero_groups = skip_zero_groups
         self.gen_update_steps = gen_update_steps
         self.save_steps = save_steps
         self.compute_gen_logps = compute_gen_logps
@@ -322,7 +323,7 @@ class LSRL:
                     curr_ans_ids = [x['token_ids'] for x in ganswers]
                     curr_rewards = torch.tensor([x['total'] for x in grewards], dtype=torch.float32)
                     group_avg_rewards.append(f'{curr_rewards.mean().item():.2f}')
-                    if curr_rewards.max() - curr_rewards.min() < 1e-4: continue
+                    if self.lsrl.skip_zero_groups and curr_rewards.max() - curr_rewards.min() < 1e-4: continue
                     curr_rewards = (curr_rewards - curr_rewards.mean()) / (curr_rewards.std() + 1e-4)
                     for ii in range(0, rn, tbsz):
                         data = {
@@ -374,6 +375,7 @@ class LSRL:
                     curr_rewards = torch.tensor([x['total'] for x in grewards], dtype=torch.float32)
                     group_avg_rewards.append(f'{curr_rewards.mean().item():.2f}')
                     bad = curr_rewards.max() - curr_rewards.min() < 1e-4
+                    if not self.lsrl.skip_zero_groups: bad = False
                     curr_rewards = (curr_rewards - curr_rewards.mean()) / (curr_rewards.std() + 1e-4)
                     for ii in range(0, rn, tbsz): 
                         if not bad: batches[batch_id]['rewards'] = curr_rewards[ii:ii+tbsz]
@@ -435,7 +437,7 @@ class LSRL:
             for i in range(0, len(items), self.gen_batch_size):
                 batch = items[i:i+self.gen_batch_size]
                 self.Q_data.put({'batch': batch})
-        self.Q_data.put({'end': 1}) 
+        for _ in range(get_world_size()): self.Q_data.put({'end': 1}) 
         for it, gendevice in enumerate(self.gen_device):
             p = ctx.Process(target=self.gen_worker, args=(self.Q_data, self.Q_state_dict, gendevice, it))
             p.start()
@@ -513,9 +515,9 @@ class LSRL:
 
         print('\n\nSome groups had same rewards and skipped, so the training steps may be less than expected.\n')
 
+        distbarrier()
         # Final save after training
         if step % self.gen_update_steps != 0:
-            distbarrier()
             if self.rank == 0:
                 print('saving model')
                 save_name = f"./step_{step}"
