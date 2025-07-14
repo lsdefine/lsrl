@@ -7,8 +7,8 @@
 *Simple, efficient, low-resource SFT and RL training solution for large language models*
 
 ## ✨ Key Features
-
-* 🎯 ​**Ultra-Low Resource Requirements**​: Train 14B models on a single 80G GPU with 18K sequence length support
+* 🚀 **Single-GPU RL Training**: Complete RL training pipeline for 7B models on just one 80G GPU
+* 🎯 ​**Ultra-Low Resource Requirements**​: SFT 14B models on a single 80G GPU with 18K sequence length support
 * 🔄 ​**Asynchronous RL Training**​: Decoupled generation and training processes with cross-machine support
 * 💾 ​**Memory Optimization**​: CPUAdamW + gradient offloading to break memory limitations
 * 🛠️ ​**Simple & Flexible**​: Clean code, loose coupling, easy to modify and extend
