@@ -21,10 +21,13 @@ def get_per_token_logps(model, input_ids):
     return torch.stack(per_token_logps)
 
 class RefServer:
-    def __init__(self, model_path, host='0.0.0.0', port=59876):
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
-        self.model.eval()
-        self.model.requires_grad_(False)
+    def __init__(self, model_path, host='0.0.0.0', port=59876, force_cpu_offload=False):
+        if model_path is not None:
+            self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+            self.model.eval()
+            self.model.requires_grad_(False)
+        else:
+            self.model = None
         self.raw_queue = queue.Queue()
         self.result_queue = queue.Queue()
         self.app = bottle.Bottle()
@@ -32,6 +35,7 @@ class RefServer:
         self.port = port
         self.small_bsz = 8
         self.oom_count = 0
+        self.force_cpu_offload = force_cpu_offload
 
     def auto_bsz_infer(self, model, input_ids, pred_func, small_bsz=0):
         sbsz = self.small_bsz if small_bsz <= 0 else small_bsz
@@ -67,8 +71,8 @@ class RefServer:
     
         param_size = sum(p.numel() * p.element_size() for p in self.model.parameters())
         gpu_total = torch.cuda.get_device_properties(0).total_memory
-        if param_size > gpu_total * 0.8:
-            print('\nAuto patch model to use CPU offloading, only support Qwen2 series now...\n')
+        if param_size > gpu_total * 0.8 or self.force_cpu_offload:
+            print('\nPatch model to use CPU offloading, only support Qwen2 series now...\n')
             from .patch_for_cpu_offload import patch_qwen2
             patch_qwen2(self.model)
         else:
@@ -80,9 +84,10 @@ class RefServer:
             tic = time.time()
             plen = d.get('plen', 0)
             if 'end' not in d:
-                with torch.inference_mode():
-                    logps = self.auto_bsz_infer(self.model, d['inputs'].to(device), get_per_token_logps)
-                d['refs'] = logps[:,plen-1:]
+                if self.model is not None:
+                    with torch.inference_mode():
+                        logps = self.auto_bsz_infer(self.model, d['inputs'].to(device), get_per_token_logps)
+                    d['refs'] = logps[:,plen-1:]
                 print('batch', d['inputs'].shape, d['rewards'], f' time: {time.time() - tic:.2f}s')
             d['remain_cnt'] = self.result_queue.qsize()
             self.result_queue.put(json_to_bytes_list(d))

@@ -113,7 +113,7 @@ class LSRL:
                  gen_device=4, train_batch_size=2, gen_update_steps=16, save_steps=200, gen_batch_size=1,
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
-                 max_pending_samples=40, skip_zero_groups=False,
+                 max_pending_samples=40, gen_pending_time=10, skip_zero_groups=False, vllm_kwargs=None, 
                  **kwargs):
         self.model_path = model_path
         self.gen_device = [gen_device] if isinstance(gen_device, int) else list(gen_device)
@@ -151,6 +151,8 @@ class LSRL:
         self.reward_processor = reward_processor 
         assert reward_processor in ['base', 'async'], "rollout_processor must be 'base' or 'async'"
         self.max_pending_samples = max_pending_samples
+        self.vllm_kwargs = vllm_kwargs or {}
+        self.gen_pending_time = gen_pending_time
 
         if trainer == 'LSCPU':
             self.trainer = LSCPUTrainer(model_path, **kwargs)
@@ -253,7 +255,12 @@ class LSRL:
         print(f'[GEN {gen_rank}]', os.environ)
 
         from vllm import LLM, SamplingParams
-        vllm_gen = LLM(model=self.model_path, enable_chunked_prefill=True, gpu_memory_utilization=0.5)
+        default_kwargs = {
+            "enable_chunked_prefill": True,
+            "gpu_memory_utilization": 0.5
+        }
+        final_kwargs = {**default_kwargs, **self.vllm_kwargs}
+        vllm_gen = LLM(model=self.model_path, **final_kwargs)
         gen_logps_sp = SamplingParams(temperature=0, top_p=1, max_tokens=1, prompt_logprobs=1)
 
         def gen_samples(items):
@@ -423,7 +430,7 @@ class LSRL:
                 self.call_hook('after_rollout', samples)
                 if rr['remain_cnt'] > self.max_pending_samples: 
                     print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
-                    time.sleep(10)
+                    time.sleep(self.gen_pending_time)
             except Exception as e:
                 print(f'[GEN {gen_rank}] Error in generation worker: {e}')
 
