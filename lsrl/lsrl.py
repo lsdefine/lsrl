@@ -28,6 +28,7 @@ class LSTrainer:
 class LSCPUTrainer(LSTrainer):
     def __init__(self, model_patch, lr=1e-6, accum_steps=16, grad_offload=False, gradient_checkpointing_ratio=1):
         super().__init__(model_patch)
+        self.accum_steps = accum_steps
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         if get_world_size() > 1:
             torch.distributed.init_process_group(backend='nccl')
@@ -56,6 +57,7 @@ class DeepSpeedTrainer(LSTrainer):
                                                     model_parameters=self.model.parameters())
         self.device = self.engine.device
         self.opt = self.engine
+        self.accum_steps = accum_steps
     
     def get_model(self): return self.engine.module
 
@@ -110,15 +112,14 @@ class GenLogRecorder:
 
 class LSRL:
     def __init__(self, model_path, epochs=1, rollout_num=8, train_data=None, trainer='LSCPU',
-                 gen_device=4, train_batch_size=2, gen_update_steps=16, save_steps=200, gen_batch_size=1,
+                 gen_device=4, train_batch_size=2, gen_update_steps=-1, save_steps=200, gen_batch_size=1,
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
                  max_pending_samples=40, gen_pending_time=10, skip_zero_groups=False, vllm_kwargs=None, 
+                 use_vllm = True,
                  **kwargs):
         self.model_path = model_path
         self.gen_device = [gen_device] if isinstance(gen_device, int) else list(gen_device)
-        # GPU device for generation, don't put it in CUDA_VISIBLE_DEVICES with deepspeed
-        # TODO: add an assert to check gen_device is not in CUDA_VISIBLE_DEVICES
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.rollout_num = rollout_num
         self.train_data = train_data
@@ -131,13 +132,13 @@ class LSRL:
             assert train_batch_size % rollout_num == 0, "train_batch_size must be divisible by rollout_num"
             self.num_mix_forward_batches = train_batch_size // rollout_num
             self.train_batch_size = rollout_num
+            raise Exception("mix_forward_batches does not faster, use train_batch_size == rollnum instead")
         else:
             assert rollout_num % train_batch_size == 0, "rollout_num must be divisible by train_batch_size"
             self.train_batch_size = train_batch_size
             self.num_mix_forward_batches = 1
 
         self.skip_zero_groups = skip_zero_groups
-        self.gen_update_steps = gen_update_steps
         self.save_steps = save_steps
         self.compute_gen_logps = compute_gen_logps
         self.generate_fn = None
@@ -160,6 +161,7 @@ class LSRL:
             self.trainer = DeepSpeedTrainer(model_path, train_batch_size=train_batch_size, **kwargs)
         else:
             raise ValueError("Unsupported trainer type. Use 'LSCPU' or 'DeepSpeed'.")
+        self.gen_update_steps = max(gen_update_steps, self.trainer.accum_steps)
     
     def set_hook(self, name, func): self._hooks[name] = func
     def set_hooks(self, **hooks): self._hooks.update(hooks)
@@ -487,6 +489,12 @@ class LSRL:
                 batch = self.get_batch()
             return batch
         
+        def do_save(step):
+            if self.rank == 0:
+                print('saving model')
+                save_name = f"./step_{step}"
+                save_model(save_name, self.trainer.get_model(), self.tokenizer)        
+
         self.device = self.trainer.device
         progress = range(1, self.all_steps+1)
         if self.rank == 0: progress = tqdm(progress)
@@ -515,17 +523,11 @@ class LSRL:
 
             if step % self.save_steps == 0:
                 distbarrier()
-                if self.rank == 0:
-                    print('saving model')
-                    save_name = f"./step_{step}"
-                    save_model(save_name, self.trainer.get_model(), self.tokenizer)
-
-        print('\n\nSome groups had same rewards and skipped, so the training steps may be less than expected.\n')
+                do_save(step)
+                
+        if self.skip_zero_groups:
+            print('\n\nSome groups had same rewards and skipped, so the training steps may be less than expected.\n')
 
         distbarrier()
         # Final save after training
-        if step % self.gen_update_steps != 0:
-            if self.rank == 0:
-                print('saving model')
-                save_name = f"./step_{step}"
-                save_model(save_name, self.trainer.get_model(), self.tokenizer)
+        if step % self.gen_update_steps != 0: do_save(step)
