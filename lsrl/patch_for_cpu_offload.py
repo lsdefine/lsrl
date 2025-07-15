@@ -55,7 +55,7 @@ def qwen2_model_forward(self, input_ids=None,
                     **flash_attn_kwargs,)[0]
 
         for ii in range(layer_idx, end):
-            if ii < 12: continue
+            if ii < self._nlayers_keep_in_gpu: continue
             self.layers[ii].to('cpu', non_blocking=True)
 
         layer_idx = end
@@ -71,8 +71,10 @@ def qwen2_model_forward(self, input_ids=None,
         attentions=all_self_attns,
     )
 
-def patch_qwen2(model):
+def patch_qwen2(model, nlayers_keep_in_gpu=12):
     tic = time.time()
+    print('\nPlease use transformers 4.52.x ...')
+    model.model._nlayers_keep_in_gpu = nlayers_keep_in_gpu
     model.model.forward = qwen2_model_forward.__get__(model.model, nn.Module)
     print('preparing model...  need 20~80s')
     model.lm_head.to('cuda')

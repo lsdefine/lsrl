@@ -21,7 +21,8 @@ def get_per_token_logps(model, input_ids):
     return torch.stack(per_token_logps)
 
 class RefServer:
-    def __init__(self, model_path, host='0.0.0.0', port=59876, force_cpu_offload=False):
+    def __init__(self, model_path, host='0.0.0.0', port=59876, force_cpu_offload=False, nlayers_keep_in_gpu=12):
+        self.__dict__.update({k: v for k, v in locals().items() if k != 'self'})
         if model_path is not None:
             self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
             self.model.eval()
@@ -31,11 +32,8 @@ class RefServer:
         self.raw_queue = queue.Queue()
         self.result_queue = queue.Queue()
         self.app = bottle.Bottle()
-        self.host = host
-        self.port = port
         self.small_bsz = 8
         self.oom_count = 0
-        self.force_cpu_offload = force_cpu_offload
 
     def auto_bsz_infer(self, model, input_ids, pred_func, small_bsz=0):
         sbsz = self.small_bsz if small_bsz <= 0 else small_bsz
@@ -74,7 +72,7 @@ class RefServer:
         if param_size > gpu_total * 0.8 or self.force_cpu_offload:
             print('\nPatch model to use CPU offloading, only support Qwen2 series now...\n')
             from .patch_for_cpu_offload import patch_qwen2
-            patch_qwen2(self.model)
+            patch_qwen2(self.model, nlayers_keep_in_gpu=self.nlayers_keep_in_gpu)
         else:
             self.model.to('cuda')
 
@@ -87,7 +85,7 @@ class RefServer:
                 if self.model is not None:
                     with torch.inference_mode():
                         logps = self.auto_bsz_infer(self.model, d['inputs'].to(device), get_per_token_logps)
-                    d['refs'] = logps[:,plen-1:]
+                    d['refs'] = logps[:,plen-1:].cpu()
                 print('batch', d['inputs'].shape, d['rewards'], f' time: {time.time() - tic:.2f}s')
             d['remain_cnt'] = self.result_queue.qsize()
             self.result_queue.put(json_to_bytes_list(d))

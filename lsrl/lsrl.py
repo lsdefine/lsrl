@@ -155,6 +155,10 @@ class LSRL:
         self.vllm_kwargs = vllm_kwargs or {}
         self.gen_pending_time = gen_pending_time
 
+        if not use_vllm:
+            from .no_vllm_lsrl_patch import apply_no_vllm_patch
+            apply_no_vllm_patch(self)
+
         if trainer == 'LSCPU':
             self.trainer = LSCPUTrainer(model_path, **kwargs)
         elif trainer == 'DeepSpeed':
@@ -257,10 +261,7 @@ class LSRL:
         print(f'[GEN {gen_rank}]', os.environ)
 
         from vllm import LLM, SamplingParams
-        default_kwargs = {
-            "enable_chunked_prefill": True,
-            "gpu_memory_utilization": 0.5
-        }
+        default_kwargs = {"enable_chunked_prefill": True, "gpu_memory_utilization": 0.5}
         final_kwargs = {**default_kwargs, **self.vllm_kwargs}
         vllm_gen = LLM(model=self.model_path, **final_kwargs)
         gen_logps_sp = SamplingParams(temperature=0, top_p=1, max_tokens=1, prompt_logprobs=1)
@@ -396,7 +397,6 @@ class LSRL:
                 try: remain_cnt = rc.json().get('remain_cnt', 0)
                 except: remain_cnt = 0
                 return {'samples':samples, 'group_avg_rewards': group_avg_rewards, 'remain_cnt': remain_cnt}
-
             
         rn = self.rollout_num 
         from torch.nn.utils.rnn import pad_sequence
