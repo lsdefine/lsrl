@@ -7,14 +7,21 @@
 *Simple, efficient, low-resource SFT and RL training solution for large language models*
 
 ## ✨ Key Features
-* 🚀 **Single-GPU RL Training**: Complete RL training pipeline for 7B models on just one 80G GPU
+* 🚀 **Single-GPU RL Training**: Complete RL training pipeline for 14B models on just one 80G GPU
 * 🎯 ​**Ultra-Low Resource Requirements**​: SFT 14B models on a single 80G GPU with 18K sequence length support
 * 🔄 ​**Asynchronous RL Training**​: Decoupled generation and training processes with cross-machine support
 * 💾 ​**Memory Optimization**​: CPUAdamW + gradient offloading to break memory limitations
 * 🛠️ ​**Simple & Flexible**​: Clean code, loose coupling, easy to modify and extend
-* ⚡ ​**Minimal Dependencies**​: Training requires only PyTorch, simple deployment
+* ⚡ ​**Minimal Dependencies**​: Training requires only PyTorch (+vLLM for RL)
 * 🎮 ​**Consumer GPU Friendly**​: Support RTX 3090/4090 for 14B model training
 
+## 👏 News
+* **🔥 NEW**: 14B model full-parameter RL training on single 80G GPU with GRPO (without vLLM)
+* **Recommended Configs**: 
+  - 7B models: Single GPU + vLLM for optimal speed
+  - 14B models: Dual 80G GPUs for production-ready training
+  - **Scale up**: More GPUs = faster training and larger batch sizes
+ 
 ## 🚀 Quick Start
 
 ### Installation
