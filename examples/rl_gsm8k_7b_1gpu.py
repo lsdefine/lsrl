@@ -98,6 +98,6 @@ if __name__ == '__main__':
     # CUDA_VISIBLE_DEVICES=7 python rl_gsm8k_7b_1gpu.py ref
     # CUDA_VISIBLE_DEVICES=7 python rl_gsm8k_7b_1gpu.py
     # gen_device=[7], i.e. all in one GPU!
-    # if the length exceeds and OOM, train_batch_size can be still reduced to 1
+    # if the length exceeds and OOM, train_batch_size can be still reduce to 1
 
     
