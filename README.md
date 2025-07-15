@@ -102,6 +102,8 @@ lsrl.train()
 CUDA_VISIBLE_DEVICES=3 python rl.py ref
 CUDA_VISIBLE_DEVICES=0 python rl.py
 ```
+Reference server can co-locate with vLLM on the same GPU (via `gpu_memory_utilization` setting).
+
 ## 🏗️ Core Architecture
 
 ### CPUAdamW Optimizer
