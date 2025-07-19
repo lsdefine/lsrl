@@ -91,7 +91,7 @@ def chunk_list(lst, chunk_size):
 
 def create_soft_len_penalty_tok(DAPO_kwargs):
     def soft_len_penalty_tok(ans, _):
-        cache_max_length = DAPO_kwargs.get('cache_max_length', 4096)
+        cache_max_length = DAPO_kwargs.get('cache_max_length', 1024)
         soft_max_length = DAPO_kwargs.get('soft_max_length', 2048)
         leny = len(ans['token_ids'])
         if leny < cache_max_length: return 0
