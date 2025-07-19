@@ -87,7 +87,6 @@ if __name__ == '__main__':
                 lr=5e-6, accum_steps=64, genlog_filename='rl_log', clip_param=0.2,
                 save_steps=1100, skip_zero_groups=False,
                 DAPO_kwargs={
-                    'soft_len_penalty': 0.01, 
                     'soft_max_length': 512, 
                     'hard_max_length': 1024, 
                     'clip_param_high': 0.28

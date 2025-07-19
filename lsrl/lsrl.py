@@ -91,9 +91,11 @@ def chunk_list(lst, chunk_size):
 
 def create_soft_len_penalty_tok(DAPO_kwargs):
     def soft_len_penalty_tok(ans, _):
-        soft_len_penalty = DAPO_kwargs.get('soft_len_penalty', 0.01)
+        hard_max_length = DAPO_kwargs.get('hard_max_length', 4096)
         soft_max_length = DAPO_kwargs.get('soft_max_length', 2048)
-        return - soft_len_penalty * max(0, len(ans['token_ids']) - soft_max_length)
+        leny = len(ans['token_ids'])
+        if leny < soft_max_length: return 0
+        return - (leny - soft_max_length) / (hard_max_length - soft_max_length)
     return soft_len_penalty_tok
 
 class GenLogRecorder:
@@ -175,7 +177,7 @@ class LSRL:
 
         if self.algorithm == 'DAPO':
             print('\nUsing DAPO algorithm for training...\n')
-            print('Available DAPO kwargs: soft_len_penalty, soft_max_length, hard_max_length, clip_param_high\n')
+            print('Available DAPO kwargs: soft_max_length, hard_max_length, clip_param_high\n')
             self.RL_step = self.DAPO_step
         else:
             self.RL_step = self.GRPO_step
