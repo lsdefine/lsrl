@@ -118,7 +118,7 @@ if __name__ == '__main__':
                 gen_update_steps=128, trainer='LSCPU', gen_temperature=0.9,
                 save_steps=30000, gen_device=[4], ref_server="http://10.176.40.139:59877",
                 lr=1e-5, accum_steps=128, genlog_filename='rl_log',
-                reward_processor='base', gradient_checkpointing_ratio=0.5)
+                gradient_checkpointing_ratio=0.5)
     lsrl.add_reward(correct_fn)
     lsrl.set_policy_prompt_fn(make_prompt_fn)
     lsrl.set_rollout_prompt_fn(make_prompt_fn)

@@ -67,16 +67,17 @@ class RefServer:
     def start(self):
         threading.Thread(target=self.run_server, daemon=False).start()
     
-        param_size = sum(p.numel() * p.element_size() for p in self.model.parameters())
-        gpu_total = torch.cuda.get_device_properties(0).total_memory
-        if param_size > gpu_total * 0.8 or self.force_cpu_offload:
-            print('\nPatch model to use CPU offloading, only support Qwen2 series now...\n')
-            from .patch_for_cpu_offload import patch_qwen2
-            patch_qwen2(self.model, nlayers_keep_in_gpu=self.nlayers_keep_in_gpu)
-        else:
-            self.model.to('cuda')
+        if self.model is not None:
+            param_size = sum(p.numel() * p.element_size() for p in self.model.parameters())
+            gpu_total = torch.cuda.get_device_properties(0).total_memory
+            if param_size > gpu_total * 0.8 or self.force_cpu_offload:
+                print('\nPatch model to use CPU offloading, only support Qwen2 series now...\n')
+                from .patch_for_cpu_offload import patch_qwen2
+                patch_qwen2(self.model, nlayers_keep_in_gpu=self.nlayers_keep_in_gpu)
+            else:
+                self.model.to('cuda')
+            device = self.model.device
 
-        device = self.model.device
         while True:
             d = self.raw_queue.get()
             tic = time.time()
