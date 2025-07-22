@@ -1,5 +1,5 @@
 
-import json, os, shutil, re, random, io, requests, ctypes, sys, time, struct, types
+import json, os, shutil, re, random, io, requests, ctypes, sys, time, struct, types, queue
 import torch
 import torch.nn as nn
 import numpy as np
@@ -166,7 +166,7 @@ class LSRL:
         self.clip_param = clip_param
         self.genlog_recorder = GenLogRecorder(genlog_filename) if genlog_filename else None
         self.reward_processor = reward_processor 
-        assert reward_processor in ['base'], "rollout_processor must be 'base' or 'async'"
+        assert reward_processor in ['base', 'async'], "rollout_processor must be 'base' or 'async'"
         self.max_pending_samples = max_pending_samples
         self.vllm_kwargs = vllm_kwargs or {}
         self.gen_pending_time = gen_pending_time
@@ -422,23 +422,83 @@ class LSRL:
                     if self.lsrl.skip_zero_groups and curr_rewards.max() - curr_rewards.min() < 1e-4: continue
                     curr_rewards = (curr_rewards - curr_rewards.mean()) / (curr_rewards.std() + 1e-4)
                     for ii in range(0, rn, tbsz):
-                        data = {
-                            'plen': prompt_ids.shape[1],
+                        data = {'plen': prompt_ids.shape[1],
                             'inputs': make_batch_inputs(prompt_ids, curr_ans_ids[ii:ii+tbsz]),
-                            'rewards': curr_rewards[ii:ii+tbsz]
-                        }
+                            'rewards': curr_rewards[ii:ii+tbsz]}
                         compute_gen_logps(data)
                         rc = requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
                 try: remain_cnt = rc.json().get('remain_cnt', 0)
                 except: remain_cnt = 0
                 return {'samples':samples, 'group_avg_rewards': group_avg_rewards, 'remain_cnt': remain_cnt}
     
+        class RolloutProcessorAsync(RolloutProcessorBase):
+            def __init__(self, lsrl):
+                super().__init__(lsrl)
+                import queue, threading
+                self.sample_queue = queue.Queue(maxsize=10)
+                self.result_queue = queue.Queue()
+                self.completed_queue = queue.Queue(maxsize=3)
+                threading.Thread(target=self._reward_worker, daemon=True).start()  
+                threading.Thread(target=self._result_worker, daemon=True).start()  
+
+            def _reward_worker(self):
+                while True:
+                    task = self.sample_queue.get()
+                    if task is None: break
+                    rewards = gen_rewards(task['samples'], task['items'])
+                    task['samples']['rewards'] = rewards
+                    self.result_queue.put(task)
+
+            def _result_worker(self):
+                while True:
+                    task = self.result_queue.get()
+                    samples, items, groups, batches = (task[k] for k in ['samples', 'items', 'groups', 'batches'])   
+                    rn, tbsz = self.lsrl.rollout_num, self.lsrl.train_batch_size
+                    groups['rewards'] = [samples['rewards'][i*rn:(i+1)*rn] for i in range(len(items))]
+                    group_avg_rewards = []
+                    batch_id = 0
+                    for grewards in groups['rewards']:
+                        curr_rewards = torch.tensor([x['total'] for x in grewards], dtype=torch.float32)
+                        group_avg_rewards.append(f'{curr_rewards.mean().item():.2f}')
+                        bad = curr_rewards.max() - curr_rewards.min() < 1e-4
+                        if not self.lsrl.skip_zero_groups: bad = False
+                        curr_rewards = (curr_rewards - curr_rewards.mean()) / (curr_rewards.std() + 1e-4)
+                        for ii in range(0, rn, tbsz): 
+                            if not bad: batches[batch_id]['rewards'] = curr_rewards[ii:ii+tbsz]
+                            batch_id += 1
+                    for data in batches:
+                        if 'rewards' not in data: continue
+                        rc = requests.post(f"{self.lsrl.ref_server}/upload", data=json_to_bytes_list(data))
+                    try: remain_cnt = rc.json().get('remain_cnt', 0)
+                    except: remain_cnt = 0
+                    rec = {'samples':samples, 'group_avg_rewards': group_avg_rewards, 'remain_cnt': remain_cnt}
+                    try: self.completed_queue.put(rec)
+                    except queue.Full: continue
+
+            def run(self, items):
+                assert self.lsrl.algorithm == 'GRPO', "Async rollout processor only supports GRPO algorithm"
+                rn, tbsz = self.lsrl.rollout_num, self.lsrl.train_batch_size
+                samples = gen_samples(items)
+                groups = {'answers': [samples['answers'][i*rn:(i+1)*rn] for i in range(len(items))]}
+                batches = []
+                for prompt, ganswers in zip(samples['prompts'], groups['answers']):
+                    prompt_ids = self.lsrl.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"]
+                    curr_ans_ids = [x['token_ids'] for x in ganswers]
+                    for ii in range(0, rn, tbsz):         
+                        data = {'plen': prompt_ids.shape[1],
+                            'inputs': make_batch_inputs(prompt_ids, curr_ans_ids[ii:ii+tbsz])}
+                        compute_gen_logps(data)
+                        batches.append(data)
+                self.sample_queue.put({'samples': samples, 'items': items, 'groups': groups, 'batches': batches}) 
+                comp = QueueGetNowait(self.completed_queue)
+                return comp  
+
         rn = self.rollout_num 
         from torch.nn.utils.rnn import pad_sequence
         
         ROLLOUT_PROCESSORS = {
             'base': RolloutProcessorBase,
-            #'async': RolloutProcessorAsync
+            'async': RolloutProcessorAsync
         }
         RolloutProcessor = ROLLOUT_PROCESSORS[self.reward_processor]
         RP = RolloutProcessor(self)
@@ -459,15 +519,20 @@ class LSRL:
                 tic = time.time()
                 items = items['batch']
                 rr = RP.run(items)
+                print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s')
+                if rr is None: continue
+
                 samples = rr['samples']
                 group_avg_rewards = rr['group_avg_rewards']
                 if gen_rank == 0 and self.genlog_recorder:
                     self.genlog_recorder.log(it, items[0], samples['answers'][:rn], samples['rewards'][:rn])
-                print(f'[GEN {gen_rank}]  time: {time.time()-tic:.2f}s    ', f'avg_rewards: {",".join(group_avg_rewards)}' )
+                print(f'[GEN {gen_rank}] avg_rewards: {",".join(group_avg_rewards)}')
                 self.call_hook('after_rollout', samples)
-                if rr['remain_cnt'] > self.max_pending_samples: 
+
+                if rr.get('remain_cnt', 0) > self.max_pending_samples: 
                     print(f'[GEN {gen_rank}] pending samples too many, wait for training process ...')
                     time.sleep(self.gen_pending_time)
+
             except Exception as e:
                 print(f'[GEN {gen_rank}] Error in generation worker: {e}')
 
