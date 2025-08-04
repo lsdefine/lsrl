@@ -16,7 +16,8 @@
 * 🎮 ​**Consumer GPU Friendly**​: Support RTX 3090/4090 for 14B model training
 
 ## 👏 News
-* **🔥 NEW**: 14B model full-parameter RL training on single 80G GPU with GRPO (without vLLM)
+* **🔥 NEW**: added GSPO.
+* 14B model full-parameter RL training on single 80G GPU with GRPO (without vLLM)
 * **Recommended Configs**: 
   - 7B models: Single GPU + vLLM for optimal speed
   - 14B models: Dual 80G GPUs for production-ready training
@@ -211,4 +212,5 @@ If you find the code in our project useful, please consider citing our work as f
   howpublished = {\url{https://github.com/lsdefine/lsrl}},
 }
 ```
+
 
