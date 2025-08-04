@@ -129,7 +129,7 @@ class LSRL:
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
                  max_pending_samples=40, gen_pending_time=10, skip_zero_groups=False, vllm_kwargs=None, 
-                 use_vllm = True, DAPO_kwargs=None,
+                 use_vllm = True, DAPO_kwargs=None, algorithm='GRPO',
                  **kwargs):
         self.model_path = model_path
         self.gen_device = [gen_device] if isinstance(gen_device, int) else list(gen_device)
@@ -141,7 +141,8 @@ class LSRL:
         self.epochs = epochs
         self.all_steps = epochs * len(train_data) * rollout_num // train_batch_size // get_world_size()
         self.DAPO_kwargs = DAPO_kwargs or {}
-        self.algorithm = 'GRPO' if DAPO_kwargs is None else 'DAPO'
+        self.algorithm = algorithm
+        if DAPO_kwargs is not None: self.algorithm = 'DAPO'
 
         self._hooks = {}
 
@@ -180,6 +181,8 @@ class LSRL:
             print('\nUsing DAPO algorithm for training...\n')
             print('Available DAPO kwargs: cache_max_length, soft_max_length, hard_max_length, clip_param_high\n')
             self.RL_step = self.DAPO_step
+        elif self.algorithm == 'GSPO':
+            self.RL_step = self.GSPO_step
         else:
             self.RL_step = self.GRPO_step
 
@@ -271,6 +274,26 @@ class LSRL:
             raise Exception("DAPO requires gen_logps in batch")
         valid_tokens = completion_mask.sum()
         loss = (per_token_loss * completion_mask).sum() / torch.clamp(valid_tokens, min=1)
+        return loss
+    
+    def GSPO_step(self, model, batch):        
+        r = self._forward_base_logits(model, batch, ref=False)
+        per_token_logps, advantages, per_token_kl, completion_mask = \
+            r['per_token_logps'], r['advantages'], r['per_token_kl'], r['completion_mask']
+        if 'gen_logps' in batch:
+            seq_length = completion_mask.sum(dim=1, keepdim=True)
+            si = per_token_logps - batch['gen_logps'].to(self.device)
+            si = si * completion_mask
+            si = torch.exp(si.sum(dim=1, keepdim=True) / seq_length)
+            clipped_ratio = torch.clamp(si, 1-self.clip_param, 1+self.clip_param)
+            per_token_loss = - torch.min(si * advantages, clipped_ratio * advantages)
+            if self.beta > 0:
+                kl = per_token_kl * completion_mask
+                kl = kl.sum(dim=1, keepdim=True) / seq_length
+                per_token_loss += self.beta * kl
+        else: 
+            raise Exception("GSPO requires gen_logps in batch")
+        loss = per_token_loss.mean()
         return loss
        
     def __getstate__(self):
@@ -476,7 +499,7 @@ class LSRL:
                     except queue.Full: continue
 
             def run(self, items):
-                assert self.lsrl.algorithm == 'GRPO', "Async rollout processor only supports GRPO algorithm"
+                assert self.lsrl.algorithm != 'DAPO', "Async rollout processor not supports re-sample algorithm"
                 rn, tbsz = self.lsrl.rollout_num, self.lsrl.train_batch_size
                 samples = gen_samples(items)
                 groups = {'answers': [samples['answers'][i*rn:(i+1)*rn] for i in range(len(items))]}
