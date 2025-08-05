@@ -236,7 +236,7 @@ class LSRL:
         per_token_logps = self.get_per_token_logps(logits, input_ids)
         per_token_logps = per_token_logps[:,prompt_length-1:]
         completion_mask = (inputs[:, prompt_length:] != self.tokenizer.pad_token_id).int()
-        if ref:
+        if ref and 'refs' in batch:
             ref_per_token_logps = batch['refs'].to(per_token_logps.device)
             per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
         else: per_token_kl = None
@@ -277,7 +277,7 @@ class LSRL:
         return loss
     
     def GSPO_step(self, model, batch):        
-        r = self._forward_base_logits(model, batch, ref=False)
+        r = self._forward_base_logits(model, batch)
         per_token_logps, advantages, per_token_kl, completion_mask = \
             r['per_token_logps'], r['advantages'], r['per_token_kl'], r['completion_mask']
         if 'gen_logps' in batch:
@@ -287,7 +287,7 @@ class LSRL:
             si = torch.exp(si.sum(dim=1, keepdim=True) / seq_length)
             clipped_ratio = torch.clamp(si, 1-self.clip_param, 1+self.clip_param)
             per_token_loss = - torch.min(si * advantages, clipped_ratio * advantages)
-            if self.beta > 0:
+            if self.beta > 0 and per_token_kl is not None:
                 kl = per_token_kl * completion_mask
                 kl = kl.sum(dim=1, keepdim=True) / seq_length
                 per_token_loss += self.beta * kl
