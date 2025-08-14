@@ -4,6 +4,7 @@ assert transformers.__version__ >= "4.20.0", f"Need transformers 4.20+, got {tra
 
 from .lsrl import LSRL, LSTrainer, LSCPUTrainer, DeepSpeedTrainer, GenLogRecorder
 from .cpuadamw import CPUAdamW, DistributedCPUAdamW
+from .cpumuon import CPUMuon, DistributedCPUMuon
 from .ref_server import RefServer
 from .reward_server import RewardServer
 from .dataloader import SFTDataHandler
@@ -12,7 +13,8 @@ from .utils import save_model, json_to_bytes_list, bytes_list_to_json, enable_gr
 
 __version__ = "0.1.0"
 __all__ = ["LSRL", "LSTrainer", "LSCPUTrainer", "DeepSpeedTrainer", 
-           "GenLogRecorder", "CPUAdamW", "DistributedCPUAdamW", "RefServer", "RewardServer"]  
+           "GenLogRecorder", "CPUAdamW", "DistributedCPUAdamW", "RefServer", "RewardServer",
+           "CPUMuon", "DistributedCPUMuon"]  
 
 __all__ += ["patch_qwen2_for_multi_gpus", "save_model", "json_to_bytes_list", "bytes_list_to_json"]
 __all__ += ["enable_gradient_checkpointing"]

@@ -26,7 +26,9 @@ class LSTrainer:
     def get_model(self): return self.model
 
 class LSCPUTrainer(LSTrainer):
-    def __init__(self, model_patch, lr=1e-6, accum_steps=16, grad_offload=False, gradient_checkpointing_ratio=1):
+    def __init__(self, model_patch, lr=1e-6, accum_steps=16, 
+                 grad_offload=False, gradient_checkpointing_ratio=1,
+                 optim='adamw', muon_lr=0.05, ns_step=3):
         super().__init__(model_patch)
         self.accum_steps = accum_steps
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -39,9 +41,15 @@ class LSCPUTrainer(LSTrainer):
         self.device = self.model.device
         self.model.gradient_checkpointing_enable()
         enable_gradient_checkpointing(self.model, gradient_checkpointing_ratio)
-        from .cpuadamw import CPUAdamW, DistributedCPUAdamW
-        if dist.is_initialized(): CPUAdamW = DistributedCPUAdamW
-        self.opt = CPUAdamW(self.model.parameters(), lr=lr, accum_steps=accum_steps, grad_offload=grad_offload)
+        if optim == 'adamw':
+            from .cpuadamw import CPUAdamW
+            self.opt = CPUAdamW(self.model.parameters(), lr=lr, accum_steps=accum_steps, grad_offload=grad_offload)
+        elif optim == 'muon':
+            from .cpumuon import CPUMuon
+            self.opt = CPUMuon(self.model.named_parameters(), lr=lr, accum_steps=accum_steps, 
+                               grad_offload=grad_offload, muon_lr=muon_lr, ns_step=ns_step)
+        else:
+            raise ValueError("Unsupported optim type. Use 'adamw' or 'muon'.")
         self.engine = self.model
 
 class DeepSpeedTrainer(LSTrainer):
