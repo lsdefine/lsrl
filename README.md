@@ -16,7 +16,8 @@
 * 🎮 ​**Consumer GPU Friendly**​: Support RTX 3090/4090 for 14B model training
 
 ## 👏 News
-* **🔥 NEW**: added GSPO.
+* **🔥 NEW**: Add **Muon** optimizer! Fast & memory-efficient as CPUAdamW. You can use it to do sft or RL.
+* Add GSPO.
 * 14B model full-parameter RL training on single 80G GPU with GRPO (without vLLM)
 * **Recommended Configs**: 
   - 7B models: Single GPU + vLLM for optimal speed
@@ -212,5 +213,6 @@ If you find the code in our project useful, please consider citing our work as f
   howpublished = {\url{https://github.com/lsdefine/lsrl}},
 }
 ```
+
 
 
