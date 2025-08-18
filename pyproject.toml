@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lsrl"
-version = "0.1.3"
+version = "0.1.4"
 description = "Low ReSource Reinforcement Learning - A PyTorch RL training framework"
 readme = "README.md"
 license = {text = "MIT"}
@@ -29,3 +29,4 @@ include = ["lsrl*"]
 [tool.black]
 line-length = 100
 target-version = ['py38']
+
