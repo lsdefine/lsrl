@@ -18,16 +18,7 @@ class SoloCPUAdamW(Optimizer):
         self.verbose = verbose
 
         params = list(params)   
-        if grad_offload is None:
-            param_size = sum(p.numel() * p.element_size() for p in params)
-            gpu_total = torch.cuda.get_device_properties(0).total_memory
-            ratio = param_size / gpu_total
-            print(f"\nParameter size: {param_size / (1024 ** 2):.2f} MB, GPU total memory: {gpu_total / (1024 ** 2):.2f} MB, ratio: {ratio:.2f}")
-            self.grad_offload = False if ratio < 0.25 else True
-            print(f"Auto-detected grad_offload: {self.grad_offload}")
-            print("If you want to train long long sequences, consider manually set grad_offload=True.")
-        else:
-            self.grad_offload = grad_offload
+        self.grad_offload = grad_offload
 
         print('\n\nThis optimizer uses lazy memory pinning, the first 2~3 steps may take longer than usual.\n')
 
@@ -38,7 +29,7 @@ class SoloCPUAdamW(Optimizer):
         cpu_params = []  
         for p in params:  
             if p.requires_grad:  
-                cpu_p = p.cpu().detach().clone().requires_grad_(True)  
+                cpu_p = p.cpu().detach().to(torch.float32).clone().requires_grad_(True)  
                 cpu_params.append(cpu_p)  
                 self.original_device_map[cpu_p] = p  
         self.cpu_optimizer = AdamW(cpu_params, lr=lr, betas=betas,  
@@ -50,19 +41,22 @@ class SoloCPUAdamW(Optimizer):
     def step(self):  
         self.current_step += 1  
         is_update_step = self.current_step >= self.accum_steps  
+
         if self.grad_offload or is_update_step:
             async_grad_transfers = []
-            for cpu_p, original_p in self.original_device_map.items():
-                if original_p.grad is not None:
-                    scaled_grad_future = (original_p.grad / self.accum_steps).to('cpu', non_blocking=True)
+            for cpu_p, orig_p in self.original_device_map.items():
+                if orig_p.grad is not None:
+                    scaled_grad_future = (orig_p.grad.to(torch.float32) / self.accum_steps).to('cpu', non_blocking=True)
                     async_grad_transfers.append((cpu_p, scaled_grad_future))
-                    original_p.grad = None
+                    orig_p.grad = None
             for cpu_p, scaled_grad in async_grad_transfers:
-                cpu_p.grad = scaled_grad if cpu_p.grad is None else cpu_p.grad + scaled_grad
+                if cpu_p.grad is None: cpu_p.grad = scaled_grad
+                else: cpu_p.grad.add_(scaled_grad)
+
         if is_update_step:  
             self.cpu_optimizer.step()  
-            for cpu_p, original_p in self.original_device_map.items():  
-                original_p.data.copy_(cpu_p.data, non_blocking=True)  
+            for cpu_p, orig_p in self.original_device_map.items():  
+                orig_p.copy_(cpu_p.to(orig_p.dtype), non_blocking=True)  
             torch.cuda.synchronize()
             self.cpu_optimizer.zero_grad()  
             self.current_step = 0  
@@ -79,16 +73,6 @@ class SoloCPUAdamW(Optimizer):
         self.cpu_optimizer.zero_grad(set_to_none=set_to_none)  
         self.current_step = 0  
 
-    def state_dict(self):  
-        return self.cpu_optimizer.state_dict()  
-
-    def load_state_dict(self, state_dict):  
-        self.cpu_optimizer.load_state_dict(state_dict)  
-        self.sync_gpu_params()  
-
-    def sync_gpu_params(self):  
-         for cpu_p, original_p in self.original_device_map.items():  
-             original_p.data.copy_(cpu_p.data)             
 
 class DistributedCPUAdamW(Optimizer):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
@@ -101,18 +85,8 @@ class DistributedCPUAdamW(Optimizer):
         self.verbose = verbose
         self.rank = torch.distributed.get_rank()
         params = list(params)  
-
-        if grad_offload is None:
-            param_size = sum(p.numel() * p.element_size() for p in params)
-            gpu_total = torch.cuda.get_device_properties(0).total_memory
-            ratio = param_size / gpu_total
-            print(f"\nParameter size: {param_size / (1024 ** 2):.2f} MB, GPU total memory: {gpu_total / (1024 ** 2):.2f} MB, ratio: {ratio:.2f}")
-            self.grad_offload = False if ratio < 0.25 else True
-            print(f"Auto-detected grad_offload: {self.grad_offload}")
-            print("If you want to train long long sequences, consider manually set grad_offload=True.")
-        else:
-            self.grad_offload = grad_offload
-
+        
+        self.grad_offload = grad_offload
         self.gpu_params = [p for p in params if p.requires_grad] 
 
         if self.rank == 0:
@@ -120,7 +94,7 @@ class DistributedCPUAdamW(Optimizer):
             cpu_params = []  
             for p in params:  
                 if p.requires_grad:  
-                    cpu_p = p.cpu().detach().clone().requires_grad_(True)  
+                    cpu_p = p.cpu().detach().to(torch.float32).clone().requires_grad_(True)  
                     cpu_params.append(cpu_p)  
                     self.original_device_map[cpu_p] = p  
             self.cpu_optimizer = AdamW(cpu_params, lr=lr, betas=betas,  
@@ -139,15 +113,16 @@ class DistributedCPUAdamW(Optimizer):
                     torch.distributed.all_reduce(p.grad.data, op=torch.distributed.ReduceOp.AVG) 
             if self.rank == 0:
                 async_grad_transfers = []
-                for cpu_p, original_p in self.original_device_map.items():
-                    if original_p.grad is not None:
-                        scaled_grad_future = (original_p.grad / self.accum_steps).to('cpu', non_blocking=True)
+                for cpu_p, orig_p in self.original_device_map.items():
+                    if orig_p.grad is not None:
+                        scaled_grad_future = (orig_p.grad.to(torch.float32) / self.accum_steps).to('cpu', non_blocking=True)
                         async_grad_transfers.append((cpu_p, scaled_grad_future))
-                        original_p.grad = None
+                        orig_p.grad = None
                 for cpu_p, scaled_grad in async_grad_transfers:
-                    cpu_p.grad = scaled_grad if cpu_p.grad is None else cpu_p.grad + scaled_grad
+                    if cpu_p.grad is None: cpu_p.grad = scaled_grad
+                    else: cpu_p.grad.add_(scaled_grad)
             else:
-                for original_p in self.gpu_params: original_p.grad = None
+                for orig_p in self.gpu_params: orig_p.grad = None
 
         if is_update_step:  
             torch.cuda.synchronize()
@@ -156,8 +131,8 @@ class DistributedCPUAdamW(Optimizer):
                 self.cpu_optimizer.step()  
                 if self.verbose: print(f"CPU optimizer step took {time.time() - tic:.2f} seconds")
                 tic = time.time()
-                for cpu_p, original_p in self.original_device_map.items():  
-                    original_p.data.copy_(cpu_p.data, non_blocking=True)  
+                for cpu_p, orig_p in self.original_device_map.items():  
+                    orig_p.copy_(cpu_p.to(orig_p.dtype), non_blocking=True)  
                 torch.cuda.synchronize()
                 if self.verbose: print(f"Data copy took {time.time() - tic:.2f} seconds")
                 self.cpu_optimizer.zero_grad()  

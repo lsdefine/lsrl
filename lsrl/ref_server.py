@@ -83,11 +83,11 @@ class RefServer:
             tic = time.time()
             plen = d.get('plen', 0)
             if 'end' not in d:
-                if self.model is not None:
+                if self.model is not None and 'inputs' in d:
                     with torch.inference_mode():
                         logps = self.auto_bsz_infer(self.model, d['inputs'].to(device), get_per_token_logps)
                     d['refs'] = logps[:,plen-1:].cpu()
-                print('batch', d['inputs'].shape, d['rewards'], f' time: {time.time() - tic:.2f}s')
+                    print('batch', d['inputs'].shape, d['rewards'], f' time: {time.time() - tic:.2f}s')
             d['remain_cnt'] = self.result_queue.qsize()
             self.result_queue.put(json_to_bytes_list(d))
             if random.random() < 0.1: print(f'raw_queue: {self.raw_queue.qsize()}, result_queue: {self.result_queue.qsize()}')
