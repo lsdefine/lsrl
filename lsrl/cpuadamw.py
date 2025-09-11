@@ -38,15 +38,16 @@ class SoloCPUAdamW(Optimizer):
         self.state = self.cpu_optimizer.state  
 
     @torch.no_grad()  
-    def step(self):  
+    def step(self, force_update=False, div_num=0):  
         self.current_step += 1  
-        is_update_step = self.current_step >= self.accum_steps  
+        is_update_step = self.current_step >= self.accum_steps or force_update
 
         if self.grad_offload or is_update_step:
+            divx = self.accum_steps if div_num == 0 else div_num
             async_grad_transfers = []
             for cpu_p, orig_p in self.original_device_map.items():
                 if orig_p.grad is not None:
-                    scaled_grad_future = (orig_p.grad.to(torch.float32) / self.accum_steps).to('cpu', non_blocking=True)
+                    scaled_grad_future = (orig_p.grad.to(torch.float32) / divx).to('cpu', non_blocking=True)
                     async_grad_transfers.append((cpu_p, scaled_grad_future))
                     orig_p.grad = None
             for cpu_p, scaled_grad in async_grad_transfers:
@@ -103,19 +104,20 @@ class DistributedCPUAdamW(Optimizer):
             self.state = self.cpu_optimizer.state 
 
     @torch.no_grad()  
-    def step(self, closure=None):  
+    def step(self, closure=None, force_update=False, div_num=0):  
         self.current_step += 1  
-        is_update_step = self.current_step >= self.accum_steps  
+        is_update_step = self.current_step >= self.accum_steps or force_update 
         
         if self.grad_offload or is_update_step:
             for p in self.gpu_params:
                 if p.grad is not None:
-                    torch.distributed.all_reduce(p.grad.data, op=torch.distributed.ReduceOp.AVG) 
+                    torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.AVG) 
             if self.rank == 0:
+                divx = self.accum_steps if div_num == 0 else div_num
                 async_grad_transfers = []
                 for cpu_p, orig_p in self.original_device_map.items():
                     if orig_p.grad is not None:
-                        scaled_grad_future = (orig_p.grad.to(torch.float32) / self.accum_steps).to('cpu', non_blocking=True)
+                        scaled_grad_future = (orig_p.grad.to(torch.float32) / divx).to('cpu', non_blocking=True)
                         async_grad_transfers.append((cpu_p, scaled_grad_future))
                         orig_p.grad = None
                 for cpu_p, scaled_grad in async_grad_transfers:

@@ -87,6 +87,7 @@ class RefServer:
                     with torch.inference_mode():
                         logps = self.auto_bsz_infer(self.model, d['inputs'].to(device), get_per_token_logps)
                     d['refs'] = logps[:,plen-1:].cpu()
+                if 'inputs' in d and 'rewards' in d:
                     print('batch', d['inputs'].shape, d['rewards'], f' time: {time.time() - tic:.2f}s')
             d['remain_cnt'] = self.result_queue.qsize()
             self.result_queue.put(json_to_bytes_list(d))

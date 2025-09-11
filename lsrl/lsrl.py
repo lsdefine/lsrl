@@ -16,34 +16,36 @@ from .utils import json_to_bytes_list, bytes_list_to_json, save_model, enable_gr
 def get_world_size(): return int(os.environ.get('WORLD_SIZE', 1))
 
 class LSTrainer:
-    def __init__(self, model_patch):
-        self.model = AutoModelForCausalLM.from_pretrained(model_patch, torch_dtype=torch.bfloat16)
+    def __init__(self, model_path):
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
         self.model.train()
     def backward(self, loss): 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-    def step(self): self.opt.step()
+    def step(self, **kwargs): self.opt.step(**kwargs)
     def get_model(self): return self.model
 
 class LSCPUTrainer(LSTrainer):
-    def __init__(self, model_patch, lr=1e-6, accum_steps=16, 
+    def __init__(self, model_path, lr=1e-6, accum_steps=16, 
                  grad_offload=False, gradient_checkpointing_ratio=1,
                  optim='adamw', muon_lr=0.05, ns_step=3):
-        super().__init__(model_patch)
         self.accum_steps = accum_steps
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         if get_world_size() > 1:
             torch.distributed.init_process_group(backend='nccl')
             torch.cuda.set_device(local_rank)
             device = torch.device('cuda', local_rank)
+            print('PROCESS RANK %d, WORLD SIZE %d, CUDA DEVICE %d' % (dist.get_rank(), get_world_size(), local_rank))
         else: device = 'cuda'
+        super().__init__(model_path)
         self.model.to(device)
         self.device = self.model.device
         self.model.gradient_checkpointing_enable()
         enable_gradient_checkpointing(self.model, gradient_checkpointing_ratio)
         if optim == 'adamw':
             from .cpuadamw import CPUAdamW
-            self.opt = CPUAdamW(self.model.parameters(), lr=lr, accum_steps=accum_steps, grad_offload=grad_offload)
+            self.opt = CPUAdamW(self.model.parameters(), lr=lr, accum_steps=accum_steps, 
+                                grad_offload=grad_offload)
         elif optim == 'muon':
             from .cpumuon import CPUMuon
             self.opt = CPUMuon(self.model.named_parameters(), lr=lr, accum_steps=accum_steps, 
@@ -347,6 +349,7 @@ class LSRL:
         final_kwargs = {**default_kwargs, **self.vllm_kwargs}
         vllm_gen = LLM(model=self.model_path, **final_kwargs)
         gen_logps_sp = SamplingParams(temperature=0, top_p=1, max_tokens=1, prompt_logprobs=1)
+        self.vllm_gen = vllm_gen
 
         if self.algorithm == 'DAPO':
             soft_len_penalty_fn = create_soft_len_penalty_tok(self.DAPO_kwargs)
@@ -358,6 +361,8 @@ class LSRL:
             answers = self.generate(vllm_gen, gen_prompts)
             policy_prompts = [self.policy_prompt_fn(x) for x in items]
             return {'prompts': policy_prompts, 'answers': answers}
+        
+        if hasattr(self, 'gen_samples'): gen_samples = lambda x: self.gen_samples(self, x)
 
         def QueueGetNowait(Q):
             try: return Q.get_nowait()
@@ -413,7 +418,7 @@ class LSRL:
             def run(self, items):
                 def make_groups(items, rn):
                     samples = gen_samples(items)
-                    samples['rewards'] = gen_rewards(samples, items)
+                    if 'rewards' not in samples: samples['rewards'] = gen_rewards(samples, items)
                     groups = {key: chunk_list(samples[key], rn) for key in ['answers', 'rewards']}
                     return samples, groups
 
@@ -476,8 +481,9 @@ class LSRL:
                 while True:
                     task = self.sample_queue.get()
                     if task is None: break
-                    rewards = gen_rewards(task['samples'], task['items'])
-                    task['samples']['rewards'] = rewards
+                    if 'rewards' not in task['samples']:
+                        rewards = gen_rewards(task['samples'], task['items'])
+                        task['samples']['rewards'] = rewards
                     self.result_queue.put(task)
 
             def _result_worker(self):
@@ -589,7 +595,7 @@ class LSRL:
         def get_batch_with_waiting():
             batch = self.get_batch()
             while batch is None:
-                print('[TRAIN] waiting for batch...'); time.sleep(10)
+                if self.rank == 0: print('[TRAIN] waiting for batch...'); time.sleep(15)
                 batch = self.get_batch()
             return batch
         
