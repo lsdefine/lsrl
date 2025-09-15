@@ -30,7 +30,7 @@ class SyncLSRL:
                  beta=0.04, clip_param=0.2, compute_gen_logps=True,
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None,
                  skip_zero_groups=False, DAPO_kwargs=None, algorithm='GRPO', update_times_per_step=2,
-                 vllm_kwargs=None,
+                 vllm_kwargs=None, swanlab=None,
                  **kwargs):
         self.model_path = model_path
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -44,6 +44,7 @@ class SyncLSRL:
         self.DAPO_kwargs = DAPO_kwargs or {}
         self.algorithm = algorithm
         if DAPO_kwargs is not None: self.algorithm = 'DAPO'
+        self.swanlab = swanlab
         self.vllm_kwargs = vllm_kwargs or {}
 
         accum_steps = 99999
@@ -86,6 +87,8 @@ class SyncLSRL:
             self.trainer = LSCPUTrainer(model_path, accum_steps=accum_steps, **kwargs)
         else:
             raise ValueError("Unsupported trainer type. Use 'LSCPU'")
+        
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
     
     def set_hook(self, name, func): self._hooks[name] = func
     def set_hooks(self, **hooks): self._hooks.update(hooks)
@@ -221,7 +224,7 @@ class SyncLSRL:
 
         from vllm import LLM, SamplingParams
         default_kwargs = {"enable_chunked_prefill": True, "gpu_memory_utilization": 0.7,
-                          "enable_sleep_mode": True, "max_num_seqs": 32, "max_model_len": 10000}
+                          "enable_sleep_mode": True, "max_num_seqs": 16, "max_model_len": 12000}
         final_kwargs = {**default_kwargs, **self.vllm_kwargs}
         vllm_gen = LLM(model=self.model_path, **final_kwargs)
         self.vllm_gen = vllm_gen
@@ -253,17 +256,17 @@ class SyncLSRL:
         
         while True:
             try:
-                data = Q_data.get()
-                if 'state_dict' in data:
+                xdata = Q_data.get()
+                if 'state_dict' in xdata:
                     self.vllm_gen.wake_up(tags=["weights"])
-                    state_dict = data['state_dict']
+                    state_dict = xdata['state_dict']
                     llm_model = self.vllm_gen.llm_engine.model_executor.driver_worker.model_runner.model
                     llm_model.load_weights(state_dict.items())
                     print(f'[GEN {gen_rank}] Updated weights for generation model.')
                     self.vllm_gen.wake_up(tags=["kv_cache"])
                     continue
 
-                batch = data['batch']
+                batch = xdata['batch']
                 if self.rank == 0: print(f'\nEach worker rollouts {len(batch)} samples ...\n')
                 rollouts = []
                 samples = gen_samples(batch)
@@ -299,8 +302,11 @@ class SyncLSRL:
                         ref_logps = torch.tensor([[list(x.values())[0].logprob for x in xx] for xx in zz])
                         data['refs'] = ref_logps
 
+                if gen_rank == 0 and self.genlog_recorder:
+                    self.genlog_recorder.log(xdata['step'], batch[0], samples['answers'][:rn], samples['rewards'][:rn])
+
                 self.vllm_gen.sleep(level=2)
-                Q_results.put(rollouts)
+                Q_results.put({'rollouts':rollouts, 'samples':samples})
 
             except Exception as e:
                 import traceback
@@ -335,7 +341,7 @@ class SyncLSRL:
         return answers
 
     def rollout_process(self, batch, step):
-        self.Q_data.put({'batch': batch})
+        self.Q_data.put({'batch': batch, 'step': step})
         rollouts = self.Q_results.get()
         return rollouts
 
@@ -359,6 +365,13 @@ class SyncLSRL:
                     for k in ['inputs', 'gen_logps', 'refs']:
                         if k in batch: batch[k] = batch[k][:, :-cut_length]
             return sub_batches                
+        
+        def change_model_checkpoint_ratio(model, ratio):
+            layers = model.model.layers
+            total_layers = len(layers)
+            start_idx = total_layers - int(total_layers * ratio)
+            for i, layer in enumerate(layers):
+                layer.gradient_checkpointing = i >= start_idx
     
         for batches in rollout_batches:
             if self.rank == 0: print([x['inputs'].shape for x in batches])
@@ -374,9 +387,9 @@ class SyncLSRL:
                 loss = self.RL_step(self.trainer.engine, batch) * sbsz
                 divx += sbsz
                 self.trainer.backward(loss)
+                if self.rank == 0: progress.set_postfix({'loss': f'{loss.item()/sbsz:.4f}'})
                 if i == len(plans) - 1: self.trainer.step(force_update=True, div_num=divx)             
                 else: self.trainer.step()
-                if self.rank == 0: progress.set_postfix({'loss': f'{loss.item()/sbsz:.4f}'})
 
         self.trainer.model.to('cpu')
         torch.cuda.synchronize()
@@ -384,7 +397,7 @@ class SyncLSRL:
         self.Q_data.put({'state_dict': self.trainer.get_model().state_dict()})
 
     def train(self):
-        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        if self.swanlab: import swanlab
 
         def do_save(step):
             if self.rank == 0:
@@ -413,12 +426,22 @@ class SyncLSRL:
 
             tic = time.time()
             mini_batch = [x for i, x in enumerate(batches[batch_id]) if i % self.world_size == self.rank]
-            rollouts = self.rollout_process(mini_batch, step)
+            rollout_ret = self.rollout_process(mini_batch, step)
+            rollouts, samples = rollout_ret['rollouts'], rollout_ret['samples']
             if self.rank == 0: print(f"[MAIN] Step {step}/{total_steps} Rollout time: {time.time() - tic:.2f}s")
+
+            if self.swanlab and self.rank == 0: 
+                swanlab.log({'avg_reward': np.mean([x['total'] for x in samples['rewards']]),
+                            'avg_ans_len': np.mean([len(x['token_ids']) for x in samples['answers']]),
+                            "rollout_time": time.time() - tic})
+
             self.train_process(rollouts, step)
             distbarrier()
 
             if self.rank == 0: print(f"[MAIN] Step {step}/{total_steps} Step time: {time.time() - tic:.2f}s")
+            
+            if self.swanlab and self.rank == 0: 
+                swanlab.log({"step_time": time.time() - tic})
 
             if step % self.save_steps == 0:
                 distbarrier()

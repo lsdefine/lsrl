@@ -92,7 +92,7 @@ def gen_samples(self, items):
         final_answers_per_item[item_idx].extend(combined)
 
     answers = [ans for sublist in final_answers_per_item for ans in sublist]
-    answers = [s + '<|end_of_text|>' for s in answers]
+    answers = [s + self.tokenizer.special_tokens_map['eos_token'] for s in answers]
     print(f"!!最终答案的数量:{len(answers)}")
 
     rewards = []
@@ -197,6 +197,7 @@ def rollout_monitor(samples):
 if __name__ == '__main__':
     with open("/data2/ljq/mix_math_dapo_gpqa_main.json", 'r', encoding='utf-8') as f:
         QAs = json.load(f)
+    QAs = [x for x in QAs if len(x['question']) < 1000]
     print(f"训练的总长度：{len(QAs)}")
     random.seed(42)
     random.shuffle(QAs)
@@ -210,11 +211,17 @@ if __name__ == '__main__':
                 save_steps=900, skip_zero_groups=False, algorithm='GRPO', 
                 max_pending_samples=30, gen_pending_time=60)
     '''
-    
+
     lsrl = SyncLSRL(model_path, epochs=1, train_data=QAs, rollout_num=8, 
-                train_batch_size=4, gen_batch_size=32, gen_max_tokens=8000,
-                trainer='LSCPU', gen_temperature=0.6, beta=0,
-                update_times_per_step=2)
+                train_batch_size=4, gen_batch_size=32, gen_max_tokens=7500,
+                trainer='LSCPU', gen_temperature=0.6, beta=0, 
+                lr=3e-6, genlog_filename='rl_log',
+                update_times_per_step=2, save_steps=20, swanlab=True)
+    
+    if lsrl.rank == 0:
+        import swanlab
+        swanlab.login(api_key="", save=True)
+        swanlab.init(project="test-sync-lsrl")
     
     lsrl.set_hook('after_rollout', rollout_monitor)
     lsrl.add_reward(correct_fn)
