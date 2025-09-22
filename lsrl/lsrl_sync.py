@@ -89,6 +89,7 @@ class SyncLSRL:
             raise ValueError("Unsupported trainer type. Use 'LSCPU'")
         
         self.rank = dist.get_rank() if dist.is_initialized() else 0
+        self.device = self.trainer.device
     
     def set_hook(self, name, func): self._hooks[name] = func
     def set_hooks(self, **hooks): self._hooks.update(hooks)
@@ -265,6 +266,7 @@ class SyncLSRL:
                     print(f'[GEN {gen_rank}] Updated weights for generation model.')
                     self.vllm_gen.wake_up(tags=["kv_cache"])
                     continue
+                if 'exit' in xdata: break
 
                 batch = xdata['batch']
                 if self.rank == 0: print(f'\nEach worker rollouts {len(batch)} samples ...\n')
@@ -285,7 +287,8 @@ class SyncLSRL:
                         data['gen_logps'] = gen_logps
                     rollouts.append(data)
 
-                if 'rewards' not in samples: rewards = self.gen_rewards(samples['answers'], batch)
+                if 'rewards' not in samples: 
+                    samples['rewards'] = rewards = self.gen_rewards(samples, batch)
                 else: rewards = samples['rewards']
                 for data in rollouts:
                     curr_rewards = torch.tensor([r['total'] for r in rewards[:rn]], dtype=torch.float)
@@ -311,7 +314,10 @@ class SyncLSRL:
             except Exception as e:
                 import traceback
                 print(f'[GEN {gen_rank}] Exception: {e}, {traceback.format_exc()}')
-
+        del self.vllm_gen
+        if dist.is_initialized(): dist.destroy_process_group()
+        #print('\nwhen vLLM exits, it may raise some CUDA errors, this is vLLM\'s problem, please ignore them.')
+        time.sleep(5)
 
     def gen_rewards(self, samples, items):
         rewards = []
@@ -395,6 +401,37 @@ class SyncLSRL:
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         self.Q_data.put({'state_dict': self.trainer.get_model().state_dict()})
+
+    def dry_check_rollout(self, gen_batch_size=2, rollout_num=3):
+        self.world_size = get_world_size()
+        assert self.world_size == 1, "dry_check_rollout only needs single GPU"
+        self.trainer.model.to('cpu')
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        self.gen_batch_size = gen_batch_size
+        self.rollout_num = rollout_num
+        self.start_gen_worker()
+
+        train_datas = list(self.train_data) * self.epochs
+        batches = chunk_list(train_datas, self.gen_batch_size)[:-1]
+        total_steps = len(batches)
+
+        for step in range(1, len(batches)+1):
+            batch_id = step - 1
+            tic = time.time()
+            mini_batch = [x for i, x in enumerate(batches[batch_id]) if i % self.world_size == self.rank]
+            rollout_ret = self.rollout_process(mini_batch, step)
+            rollouts, samples = rollout_ret['rollouts'], rollout_ret['samples']
+            if self.rank == 0: print(f"[MAIN] Step {step}/{total_steps} Rollout time: {time.time() - tic:.2f}s")
+            for k, v in samples.items(): 
+                print('------------\n', k)
+                for x in v: print(x, '\n')
+            break
+
+        self.Q_data.put({'exit':1})
+        if dist.is_initialized(): dist.destroy_process_group()
+        sys.exit(0)
+
 
     def train(self):
         if self.swanlab: import swanlab

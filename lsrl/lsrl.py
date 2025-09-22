@@ -134,13 +134,14 @@ class GenLogRecorder:
         self.jsonl_file.flush()
 
 class LSRL:
-    def __init__(self, model_path, epochs=1, rollout_num=8, train_data=None, trainer='LSCPU',
+    def __init__(self, model_path='', epochs=1, rollout_num=8, train_data=None, trainer='LSCPU',
                  gen_device=4, train_batch_size=2, gen_update_steps=-1, save_steps=200, gen_batch_size=1,
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
                  max_pending_samples=40, gen_pending_time=10, skip_zero_groups=False, vllm_kwargs=None, 
                  use_vllm = True, DAPO_kwargs=None, algorithm='GRPO',
                  **kwargs):
+        if trainer is None: return
         self.model_path = model_path
         self.gen_device = [gen_device] if isinstance(gen_device, int) else list(gen_device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -235,13 +236,13 @@ class LSRL:
 
     def _forward_base_logits(self, model, batch, ref=True):
         prompt_length = batch['plen']
-        inputs = batch['inputs'].to(self.device)
-        advantages = batch['rewards'].to(self.device).unsqueeze(1)
+        inputs = batch['inputs'].to(model.device)
+        advantages = batch['rewards'].to(model.device).unsqueeze(1)
         if '#computed_logits' not in batch:
             logits = model(inputs, use_cache=False).logits
             logits = logits[:, :-1, :]  
         else:
-            logits = batch['#computed_logits'].to(self.device)
+            logits = batch['#computed_logits'].to(model.device)
         input_ids = inputs[:, 1:]  
         per_token_logps = self.get_per_token_logps(logits, input_ids)
         per_token_logps = per_token_logps[:,prompt_length-1:]
@@ -262,7 +263,7 @@ class LSRL:
         per_token_logps, advantages, per_token_kl, completion_mask = \
             r['per_token_logps'], r['advantages'], r['per_token_kl'], r['completion_mask']
         if 'gen_logps' in batch:
-            ratio = torch.exp(per_token_logps - batch['gen_logps'].to(self.device))
+            ratio = torch.exp(per_token_logps - batch['gen_logps'].to(model.device))
             clipped_ratio = torch.clamp(ratio, 1-self.clip_param, 1+self.clip_param)
             per_token_loss = torch.min(ratio * advantages, clipped_ratio * advantages)
         else: 
@@ -277,7 +278,7 @@ class LSRL:
         per_token_logps, advantages, completion_mask = r['per_token_logps'], r['advantages'], r['completion_mask']
         if 'gen_logps' in batch:
             clip_param_high = self.DAPO_kwargs.get('clip_param_high', 0.28)
-            ratio = torch.exp(per_token_logps - batch['gen_logps'].to(self.device))
+            ratio = torch.exp(per_token_logps - batch['gen_logps'].to(model.device))
             clipped_ratio = torch.clamp(ratio, 1-self.clip_param, 1+clip_param_high)
             per_token_loss = - torch.min(ratio * advantages, clipped_ratio * advantages)
         else: 
