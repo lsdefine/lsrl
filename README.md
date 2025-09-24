@@ -16,7 +16,9 @@
 * 🎮 ​**Consumer GPU Friendly**​: Support RTX 3090/4090 for 14B model training
 
 ## 👏 News
-* **🔥 NEW**: Add **Muon** optimizer! Fast & memory-efficient as CPUAdamW. You can use it to do sft or RL.
+* **🔥 NEW**: Add SyncLSRL, which runs like verl and you don't need to carefully set gen_devices and ref_devices. See examples/rl_callpy.py.
+* **🔥 NEW**: Add supports to vLLM v1 with use_vllm_v1=True. Just one env varible, enabling state dict updating and prefix caching.
+* Add **Muon** optimizer! Fast & memory-efficient as CPUAdamW. You can use it to do sft or RL.
 * Add GSPO.
 * 14B model full-parameter RL training on single 80G GPU with GRPO (without vLLM)
 * **Recommended Configs**: 
@@ -213,6 +215,7 @@ If you find the code in our project useful, please consider citing our work as f
   howpublished = {\url{https://github.com/lsdefine/lsrl}},
 }
 ```
+
 
 
 
