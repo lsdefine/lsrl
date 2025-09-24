@@ -30,7 +30,7 @@ class SyncLSRL:
                  beta=0.04, clip_param=0.2, compute_gen_logps=True,
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None,
                  skip_zero_groups=False, DAPO_kwargs=None, algorithm='GRPO', update_times_per_step=2,
-                 vllm_kwargs=None, swanlab=None,
+                 vllm_kwargs=None, swanlab=None, use_vllm_v1=False,
                  **kwargs):
         self.model_path = model_path
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -46,6 +46,7 @@ class SyncLSRL:
         if DAPO_kwargs is not None: self.algorithm = 'DAPO'
         self.swanlab = swanlab
         self.vllm_kwargs = vllm_kwargs or {}
+        self.use_vllm_v1 = use_vllm_v1
 
         accum_steps = 99999
         assert gen_batch_size % update_times_per_step == 0, "gen_batch_size must be divisible by update_times_per_step"
@@ -204,7 +205,8 @@ class SyncLSRL:
 
     def gen_worker(self, Q_data, Q_results, gen_device, gen_rank=0):
         os.environ["CUDA_VISIBLE_DEVICES"] = f'{gen_device}'
-        os.environ["VLLM_USE_V1"] = "0"
+        if self.use_vllm_v1: os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        else: os.environ["VLLM_USE_V1"] = "0"
         cleanup_keys = [  
             'RANK', 'WORLD_SIZE', 'MASTER_ADDR', 'MASTER_PORT', 'LOCAL_RANK',  
             'LOCAL_WORLD_SIZE', 'GROUP_RANK', 'ROLE_RANK', 'ROLE_NAME',   

@@ -139,7 +139,7 @@ class LSRL:
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
                  max_pending_samples=40, gen_pending_time=10, skip_zero_groups=False, vllm_kwargs=None, 
-                 use_vllm = True, DAPO_kwargs=None, algorithm='GRPO',
+                 use_vllm = True, DAPO_kwargs=None, algorithm='GRPO', use_vllm_v1=False,
                  **kwargs):
         if trainer is None: return
         self.model_path = model_path
@@ -154,6 +154,7 @@ class LSRL:
         self.DAPO_kwargs = DAPO_kwargs or {}
         self.algorithm = algorithm
         if DAPO_kwargs is not None: self.algorithm = 'DAPO'
+        self.use_vllm_v1 = use_vllm_v1
 
         self._hooks = {}
 
@@ -326,7 +327,8 @@ class LSRL:
 
     def gen_worker(self, Q_data, Q_state_dict, gen_device, gen_rank=0):
         os.environ["CUDA_VISIBLE_DEVICES"] = f'{gen_device}'
-        os.environ["VLLM_USE_V1"] = "0"
+        if self.use_vllm_v1: os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        else: os.environ["VLLM_USE_V1"] = "0"
         cleanup_keys = [  
             'RANK', 'WORLD_SIZE', 'MASTER_ADDR', 'MASTER_PORT', 'LOCAL_RANK',  
             'LOCAL_WORLD_SIZE', 'GROUP_RANK', 'ROLE_RANK', 'ROLE_NAME',   

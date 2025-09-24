@@ -1,6 +1,7 @@
 import torch, time, os
 from torch.optim import Optimizer, AdamW 
 import torch.distributed as dist
+from torch.nn.utils import clip_grad_norm_
 
 class CPUAdamW(Optimizer):  
     def __new__(cls, *args, **kwargs):
@@ -11,11 +12,12 @@ class CPUAdamW(Optimizer):
 
 class SoloCPUAdamW(Optimizer):  
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,  
-                 weight_decay=0.0, accum_steps=1, grad_offload=None, verbose=False,
+                 weight_decay=0.0, accum_steps=1, grad_offload=None, verbose=False, grad_clip=None,
                  **kwargs):     
         self.accum_steps = accum_steps  
         self.current_step = 0  
         self.verbose = verbose
+        self.grad_clip = grad_clip
 
         params = list(params)   
         self.grad_offload = grad_offload
@@ -44,6 +46,7 @@ class SoloCPUAdamW(Optimizer):
 
         if self.grad_offload or is_update_step:
             divx = self.accum_steps if div_num == 0 else div_num
+            if self.grad_clip is not None: clip_grad_norm_(self.original_device_map.values(), max_norm=self.grad_clip)
             async_grad_transfers = []
             for cpu_p, orig_p in self.original_device_map.items():
                 if orig_p.grad is not None:
@@ -77,7 +80,7 @@ class SoloCPUAdamW(Optimizer):
 
 class DistributedCPUAdamW(Optimizer):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0.0, accum_steps=1, grad_offload=None, verbose=False,
+                 weight_decay=0.0, accum_steps=1, grad_offload=None, verbose=False, grad_clip=None,
                  **kwargs):
         if int(os.environ.get('OMP_NUM_THREADS', 1)) < 10:
             print("\n\nWarning: OMP_NUM_THREADS is set to a low value, which may cause performance issues. Consider setting it to 10 or higher.")
@@ -86,6 +89,7 @@ class DistributedCPUAdamW(Optimizer):
         self.verbose = verbose
         self.rank = torch.distributed.get_rank()
         params = list(params)  
+        self.grad_clip = grad_clip
         
         self.grad_offload = grad_offload
         self.gpu_params = [p for p in params if p.requires_grad] 
@@ -114,6 +118,7 @@ class DistributedCPUAdamW(Optimizer):
                     torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.AVG) 
             if self.rank == 0:
                 divx = self.accum_steps if div_num == 0 else div_num
+                if self.grad_clip is not None: clip_grad_norm_(self.original_device_map.values(), max_norm=self.grad_clip)
                 async_grad_transfers = []
                 for cpu_p, orig_p in self.original_device_map.items():
                     if orig_p.grad is not None:
