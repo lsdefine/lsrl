@@ -83,41 +83,6 @@ from math_verify import parse, verify, ExprExtractionConfig
 # math_verify can not run in another thread!!!
 # async reward processor is used to requests reward server
 
-if 'test' in sys.argv:
-    number = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
-    print(f'Testing model at step {number}...')
-    if number > 0: model_path = f'./step_{number}'
-
-    from datasets import load_dataset
-    dataset = load_dataset("openai/gsm8k", "main", split="test")
-    QAs = [{'question':x, 'std':y.split('####')[-1].strip()} for x,y in zip(dataset['question'], dataset['answer'])]
-        
-    from vllm import LLM, SamplingParams
-    vllm_gen = LLM(model=model_path, enable_chunked_prefill=True, 
-                gpu_memory_utilization=0.5, enforce_eager=True)
-    sampling_params = SamplingParams(n=1, temperature=0.001, max_tokens=1024)
-
-    from transformers import AutoTokenizer
-    test_obj = lambda: None
-    test_obj.tokenizer = AutoTokenizer.from_pretrained(model_path)
-    prompts = [make_prompt_fn(test_obj, x) for x in QAs]
-    voutputs = vllm_gen.generate(prompts, sampling_params, use_tqdm=True)
-
-    corrs = [1 * (correct_fn(x.outputs[0].text, item) > 0) for x, item in zip(voutputs, QAs)]
-    print(corrs)
-    wrongs = [k for k,v in enumerate(corrs) if v == 0]
-    print('Wrong QA:', wrongs)
-    acc = sum(corrs) / len(corrs)
-    print(f'Accuracy: {acc:.2f}')
-
-    with open('gsm8k_results.txt', 'w') as f:
-        for k in wrongs:
-            text = voutputs[k].outputs[0].text
-            item = QAs[k]
-            f.write(f'Q: {item["question"]}\nA: {item["std"]}\nVLLM: {text}\n\n')
-    sys.exit()
-
-
 all_corrs = []
 def rollout_monitor(samples):
     global all_corrs
