@@ -30,7 +30,7 @@ class SyncLSRL:
                  beta=0.04, clip_param=0.2, compute_gen_logps=True,
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None,
                  skip_zero_groups=False, DAPO_kwargs=None, algorithm='GRPO', update_times_per_step=2,
-                 vllm_kwargs=None, swanlab=None, use_vllm_v1=False,
+                 vllm_kwargs=None, swanlab=None, use_vllm_v1=False, dtype=torch.bfloat16,
                  **kwargs):
         self.model_path = model_path
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -85,7 +85,7 @@ class SyncLSRL:
             self.RL_step = self.GRPO_step
 
         if trainer == 'LSCPU':
-            self.trainer = LSCPUTrainer(model_path, accum_steps=accum_steps, **kwargs)
+            self.trainer = LSCPUTrainer(model_path, accum_steps=accum_steps, dtype=dtype, **kwargs)
         else:
             raise ValueError("Unsupported trainer type. Use 'LSCPU'")
         

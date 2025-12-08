@@ -3,6 +3,12 @@ from torch.optim import Optimizer, AdamW
 import torch.distributed as dist
 from torch.nn.utils import clip_grad_norm_
 
+if hasattr(torch, 'npu') and torch.npu.is_available():
+    synchronize = torch.npu.synchronize
+    print("[CPUAdamW] Backend bound to: NPU (Ascend)")
+else:
+    synchronize = torch.cuda.synchronize
+
 class CPUAdamW(Optimizer):  
     def __new__(cls, *args, **kwargs):
         if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
@@ -61,7 +67,7 @@ class SoloCPUAdamW(Optimizer):
             self.cpu_optimizer.step()  
             for cpu_p, orig_p in self.original_device_map.items():  
                 orig_p.copy_(cpu_p.to(orig_p.dtype), non_blocking=True)  
-            torch.cuda.synchronize()
+            synchronize()
             self.cpu_optimizer.zero_grad()  
             self.current_step = 0  
         return is_update_step  
@@ -132,7 +138,7 @@ class DistributedCPUAdamW(Optimizer):
                 for orig_p in self.gpu_params: orig_p.grad = None
 
         if is_update_step:  
-            torch.cuda.synchronize()
+            synchronize()
             if self.rank == 0:
                 tic = time.time()
                 self.cpu_optimizer.step()  
@@ -140,7 +146,7 @@ class DistributedCPUAdamW(Optimizer):
                 tic = time.time()
                 for cpu_p, orig_p in self.original_device_map.items():  
                     orig_p.copy_(cpu_p.to(orig_p.dtype), non_blocking=True)  
-                torch.cuda.synchronize()
+                synchronize()
                 if self.verbose: print(f"Data copy took {time.time() - tic:.2f} seconds")
                 self.cpu_optimizer.zero_grad()  
             torch.distributed.barrier()

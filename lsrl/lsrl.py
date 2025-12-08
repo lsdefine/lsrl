@@ -16,8 +16,8 @@ from .utils import json_to_bytes_list, bytes_list_to_json, save_model, enable_gr
 def get_world_size(): return int(os.environ.get('WORLD_SIZE', 1))
 
 class LSTrainer:
-    def __init__(self, model_path):
-        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+    def __init__(self, model_path, dtype=torch.bfloat16):
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype)
         self.model.train()
     def backward(self, loss): 
         loss.backward()
@@ -28,7 +28,7 @@ class LSTrainer:
 class LSCPUTrainer(LSTrainer):
     def __init__(self, model_path, lr=1e-6, accum_steps=16, 
                  grad_offload=False, gradient_checkpointing_ratio=1,
-                 optim='adamw', muon_lr=0.05, ns_step=3):
+                 optim='adamw', muon_lr=0.05, ns_step=3, dtype=torch.bfloat16):
         self.accum_steps = accum_steps
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         if get_world_size() > 1:
@@ -37,7 +37,7 @@ class LSCPUTrainer(LSTrainer):
             device = torch.device('cuda', local_rank)
             print('PROCESS RANK %d, WORLD SIZE %d, CUDA DEVICE %d' % (dist.get_rank(), get_world_size(), local_rank))
         else: device = 'cuda'
-        super().__init__(model_path)
+        super().__init__(model_path, dtype)
         self.model.to(device)
         self.device = self.model.device
         self.model.gradient_checkpointing_enable()
@@ -139,7 +139,7 @@ class LSRL:
                  beta=0.04, clip_param=0.2, compute_gen_logps=True, ref_server="http://localhost:59876",
                  gen_max_tokens=4096, gen_temperature=0.9, genlog_filename=None, reward_processor='base',
                  max_pending_samples=40, gen_pending_time=10, skip_zero_groups=False, vllm_kwargs=None, 
-                 use_vllm = True, DAPO_kwargs=None, algorithm='GRPO', use_vllm_v1=False,
+                 use_vllm = True, DAPO_kwargs=None, algorithm='GRPO', use_vllm_v1=False, dtype=torch.bfloat16,
                  **kwargs):
         if trainer is None: return
         self.model_path = model_path
@@ -199,7 +199,7 @@ class LSRL:
             self.RL_step = self.GRPO_step
 
         if trainer == 'LSCPU':
-            self.trainer = LSCPUTrainer(model_path, **kwargs)
+            self.trainer = LSCPUTrainer(model_path, dtype=dtype, **kwargs)
         elif trainer == 'DeepSpeed':
             self.trainer = DeepSpeedTrainer(model_path, train_batch_size=train_batch_size, **kwargs)
         else:
@@ -294,18 +294,19 @@ class LSRL:
             r['per_token_logps'], r['advantages'], r['per_token_kl'], r['completion_mask']
         if 'gen_logps' in batch:
             seq_length = completion_mask.sum(dim=1, keepdim=True)
-            si = per_token_logps - batch['gen_logps'].to(self.device)
+            si = per_token_logps - batch['gen_logps'].to(model.device)
             si = si * completion_mask
             si = torch.exp(si.sum(dim=1, keepdim=True) / seq_length)
             clipped_ratio = torch.clamp(si, 1-self.clip_param, 1+self.clip_param)
             per_token_loss = - torch.min(si * advantages, clipped_ratio * advantages)
             if self.beta > 0 and per_token_kl is not None:
-                kl = per_token_kl * completion_mask
+                kl = torch.clamp(per_token_kl, max=1.0) * completion_mask
                 kl = kl.sum(dim=1, keepdim=True) / seq_length
                 per_token_loss += self.beta * kl
         else: 
             raise Exception("GSPO requires gen_logps in batch")
         loss = per_token_loss.mean()
+        if abs(loss.item()) > 20: breakpoint()
         return loss
        
     def __getstate__(self):
