@@ -11,6 +11,16 @@ from tqdm import tqdm
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+
+if hasattr(torch, 'npu'):
+    NDEV, NBACKEND = 'npu', 'hccl'
+    torchN = torch.npu
+    NENV_VDEV = 'ASCEND_RT_VISIBLE_DEVICES'
+else:
+    NDEV, NBACKEND = 'cuda', 'nccl'
+    torchN = torch.cuda
+    NENV_VDEV = 'CUDA_VISIBLE_DEVICES'
+
 from .utils import json_to_bytes_list, bytes_list_to_json, save_model, enable_gradient_checkpointing
 
 def get_world_size(): return int(os.environ.get('WORLD_SIZE', 1))
@@ -32,11 +42,11 @@ class LSCPUTrainer(LSTrainer):
         self.accum_steps = accum_steps
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         if get_world_size() > 1:
-            torch.distributed.init_process_group(backend='nccl')
-            torch.cuda.set_device(local_rank)
-            device = torch.device('cuda', local_rank)
-            print('PROCESS RANK %d, WORLD SIZE %d, CUDA DEVICE %d' % (dist.get_rank(), get_world_size(), local_rank))
-        else: device = 'cuda'
+            torch.distributed.init_process_group(backend=NBACKEND)
+            torchN.set_device(local_rank)
+            device = torch.device(NDEV, local_rank)
+            print('PROCESS RANK %d, WORLD SIZE %d, DEVICE %d' % (dist.get_rank(), get_world_size(), local_rank))
+        else: device = NDEV
         super().__init__(model_path, dtype)
         self.model.to(device)
         self.device = self.model.device
@@ -327,7 +337,7 @@ class LSRL:
         return answers
 
     def gen_worker(self, Q_data, Q_state_dict, gen_device, gen_rank=0):
-        os.environ["CUDA_VISIBLE_DEVICES"] = f'{gen_device}'
+        os.environ[NENV_VDEV] = f'{gen_device}'
         if self.use_vllm_v1: os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         else: os.environ["VLLM_USE_V1"] = "0"
         cleanup_keys = [  
@@ -337,14 +347,14 @@ class LSRL:
             'TORCHELASTIC_RESTART_COUNT', 'TORCHELASTIC_MAX_RESTARTS',  
             'TORCHELASTIC_RUN_ID', 'TORCHELASTIC_USE_AGENT_STORE',  
             'TORCHELASTIC_ERROR_FILE',  
-            'TORCH_NCCL_ASYNC_ERROR_HANDLING',  
+            'TORCH_NCCL_ASYNC_ERROR_HANDLING', 'HCCL_COMM_ID'
             'NCCL_COMM_ID', 'NCCL_DEBUG', 'NCCL_SOCKET_IFNAME',  
         ]  
         for key in cleanup_keys: os.environ.pop(key, None)
         
-        torch.cuda.set_device(0)
+        torchN.set_device(0)
         print(f"[GEN {gen_rank}] Generation worker process uses GPU {gen_device}")
-        print(f"[GEN {gen_rank}] CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+        print(f"[GEN {gen_rank}] {NENV_VDEV}: {os.environ.get(NENV_VDEV)}")
         print(f"[GEN {gen_rank}] PID: {os.getpid()}")
         print(f'[GEN {gen_rank}]', os.environ)
 

@@ -5,7 +5,7 @@ from torch.nn.utils import clip_grad_norm_
 
 if hasattr(torch, 'npu') and torch.npu.is_available():
     synchronize = torch.npu.synchronize
-    print("[CPUAdamW] Backend bound to: NPU (Ascend)")
+    #print("[CPUAdamW] Backend bound to: NPU (Ascend)")
 else:
     synchronize = torch.cuda.synchronize
 

@@ -13,6 +13,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from .utils import save_model
 from .lsrl import LSCPUTrainer, get_world_size, distbarrier, chunk_list, GenLogRecorder
+from .lsrl import torchN, NDEV, NBACKEND, NENV_VDEV
 
 def create_soft_len_penalty_tok(DAPO_kwargs):
     def soft_len_penalty_tok(ans, _):
@@ -198,13 +199,13 @@ class SyncLSRL:
         ctx = mp.get_context('spawn')
         self.Q_data = ctx.Queue()
         self.Q_results = ctx.Queue()
-        logical = torch.cuda.current_device()  
-        physical = (lambda m, i: i if not m else m[i])([int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()] or None, logical)
+        logical = torchN.current_device()  
+        physical = (lambda m, i: i if not m else m[i])([int(x) for x in os.environ.get(NENV_VDEV, "").split(",") if x.strip()] or None, logical)
         p = ctx.Process(target=self.gen_worker, args=(self.Q_data, self.Q_results, physical, self.rank))
         p.start()
 
     def gen_worker(self, Q_data, Q_results, gen_device, gen_rank=0):
-        os.environ["CUDA_VISIBLE_DEVICES"] = f'{gen_device}'
+        os.environ[NENV_VDEV] = f'{gen_device}'
         if self.use_vllm_v1: os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         else: os.environ["VLLM_USE_V1"] = "0"
         cleanup_keys = [  
@@ -214,14 +215,14 @@ class SyncLSRL:
             'TORCHELASTIC_RESTART_COUNT', 'TORCHELASTIC_MAX_RESTARTS',  
             'TORCHELASTIC_RUN_ID', 'TORCHELASTIC_USE_AGENT_STORE',  
             'TORCHELASTIC_ERROR_FILE',  
-            'TORCH_NCCL_ASYNC_ERROR_HANDLING',  
+            'TORCH_NCCL_ASYNC_ERROR_HANDLING', 'HCCL_COMM_ID',
             'NCCL_COMM_ID', 'NCCL_DEBUG', 'NCCL_SOCKET_IFNAME',  
         ]  
         for key in cleanup_keys: os.environ.pop(key, None)
         
-        torch.cuda.set_device(0)
+        torchN.set_device(0)
         print(f"[GEN {gen_rank}] Generation worker process uses GPU {gen_device}")
-        print(f"[GEN {gen_rank}] CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+        print(f"[GEN {gen_rank}] {NENV_VDEV}: {os.environ.get(NENV_VDEV)}")
         print(f"[GEN {gen_rank}] PID: {os.getpid()}")
         print(f'[GEN {gen_rank}]', os.environ)
 
@@ -400,16 +401,16 @@ class SyncLSRL:
                 else: self.trainer.step()
 
         self.trainer.model.to('cpu')
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        torchN.synchronize()
+        torchN.empty_cache()
         self.Q_data.put({'state_dict': self.trainer.get_model().state_dict()})
 
     def dry_check_rollout(self, gen_batch_size=2, rollout_num=3):
         self.world_size = get_world_size()
         assert self.world_size == 1, "dry_check_rollout only needs single GPU"
         self.trainer.model.to('cpu')
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        torchN.synchronize()
+        torchN.empty_cache()
         self.gen_batch_size = gen_batch_size
         self.rollout_num = rollout_num
         self.start_gen_worker()
@@ -447,8 +448,8 @@ class SyncLSRL:
         self.world_size = get_world_size()
 
         self.trainer.model.to('cpu')
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        torchN.synchronize()
+        torchN.empty_cache()
 
         if self.beta > 0:
             self.ref_state_cpu = {k:v.detach().clone() for k, v in self.trainer.model.state_dict().items()}
